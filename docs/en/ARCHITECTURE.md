@@ -85,7 +85,7 @@ sequenceDiagram
     alt matches and there are nodes
         V->>V: flyToNode() (1-3 nodes) or highlightCluster() (4+)
     else doesn't match, or chat/web with no nodes
-        V->>V: camera stays put; warns if the galaxy is out of date
+        V->>V: camera stays put, warns if the galaxy is out of date
     end
     V->>U: shows the answer and reads it aloud (speechSynthesis)
 ```
@@ -187,3 +187,128 @@ moai/
 │   └── images/                  # the only images/ folder actually served
 └── tests/                       # offline unit tests, no network/API calls
 ```
+
+---
+
+## 9. Frontend implementation reference (`viewer/index.html`)
+
+The entire UI is a single HTML file (CSS + HTML + JS, no build step, no
+framework). This section is the detailed reference; the project's own
+fast-path context doc keeps only a short index pointing here.
+
+### CSS variables (theme)
+```css
+--space: #060b0e        /* background */
+--note: #8fae6f         /* green */
+--connector: #45c4b0    /* teal */
+--tool: #c98a5e         /* orange */
+--project: #d9aa4b      /* gold */
+--idea: #f2e8d5         /* cream */
+--face-standby: #e8ede9
+--face-thinking: #e8c22e
+--face-talking: #4fa3e0
+--face-tools: #4caf6e
+--face-error: #e0554a
+```
+
+### Moai face
+
+`#moai-face` is a `180×270px` container (bottom-right) with:
+- `<img id="moai-photo">` — `moai-clean.png` with `object-fit: cover; object-position: top center`
+- `<svg id="moai-svg" viewBox="0 0 72 108">` — SVG overlay drawn on top
+  - Eyes (`eye-l`, `eye-r` rects), pupils (`eye-pupil` circles), nose mark, mouth line
+  - Chest ring + inner fill circle + glyph accent lines
+  - `face-outline` rect (thin perimeter border around the face)
+- **5 CSS states** driven by `setFaceState(state)`:
+  - `s-idle` — opacity 0.1 (nearly invisible in standby)
+  - `s-listening` — dim white
+  - `s-thinking` — gold animated pulse
+  - `s-tools` — green animated pulse
+  - `s-talking` — blue animated pulse (same animation as thinking)
+  - `s-error` — red
+
+`setFaceState` is called from: `setStatus()` (thinking/tools), `rec.onstart` (listening), `speakBrowser` / `speakElevenLabs` start/end events (talking).
+
+### Splash screen
+
+`#splash` covers the full viewport with `images/web.jpg`.
+- First visit: 5 seconds minimum delay.
+- Subsequent visits: 300ms.
+- Click-to-skip: `splashEl.addEventListener('click', e => { if (e.button === 0) hideSplashNow(); }, { once: true })`.
+- `hideSplashNow()` directly adds `.hide` class (opacity → 0) then removes the element after 1.2s.
+- **Do NOT use `maybeHideSplash()` for click-to-skip** — it requires both `splashMinDelayDone` AND `splashAppReady` flags to be true, so clicking before the galaxy engine finishes would do nothing.
+
+### Conversation mode
+
+Button `#conv-mode` toggles `conversationMode` flag (persisted in `localStorage`).
+When ON: after `speak()` resolves, `startListening()` is called automatically.
+`speak()` returns a `Promise` — both `speakBrowser()` and `speakElevenLabs()` are async and resolve when audio finishes.
+
+### Bilingual preferences
+
+Language (`es`/`en`) and the addressed name are stored server-side in `preferences.json` (GET/POST `/preferences`), not `localStorage` — every other setting on this page uses `localStorage`, this one deliberately doesn't, so it survives across browsers/reinstalls and is human-editable outside the browser, matching `config.json`'s pattern. On first run (`lang` is `null`), the viewer shows a one-time prompt (`#lang-prompt`) after the splash hides asking for a name and Español/English; after that it's changeable anytime via the `#lang-pick` toggle in the chat bar (voice + recognition switch live, no reload) or the name field in the Actions panel. `build_system_prompt()` in `server.py` reads `preferences.json` itself (not a client-supplied value) and selects between `_system_prompt_parts_es`/`_system_prompt_parts_en`. The "IORANA" greeting stays fixed in both languages — Rapa Nui brand identity, not an interface-language string — only the addressed name changes.
+
+**Load-order gotcha (real incident):** `PREFS` must be declared before any code that reads it can run — `pickVoice()` reads `PREFS.lang` and is called synchronously at page load (`speechSynthesis.onvoiceschanged` + an immediate call), well before the rest of the Phase 16 block would otherwise declare it. Declaring `PREFS` there put it in the temporal dead zone, threw a `ReferenceError` on every load, and silently killed the entire script — the splash never hid and nothing after it ran, with no visible console error until deep inspection. Fixed by declaring `let PREFS` immediately after `let DATA = GRAPH;`, near the top of the script. If you add new state that early-running functions depend on, declare it that early too.
+
+### Voice (speech recognition)
+
+`SpeechRecognition` with `rec.lang` set to `es-ES` or `en-US` from the language preference. Single-shot (not continuous). In conversation mode, `rec.onend` restarts it after a 400ms delay.
+
+### Voice (speech synthesis)
+
+Auto-selects a voice matching the language preference — for Spanish it scores named voices (prefers "Álvaro", "Natural", "Pablo"); for English it just prefers a "natural/online" voice, since named voices aren't standardized enough across OSes to hardcode a short list. Manual override via `#voice-pick` dropdown. Voice preference saved to `localStorage` as `moai-voice-name` (this one setting stays client-side, unlike `lang`/`name`).
+
+### ElevenLabs TTS — CURRENTLY DISABLED
+
+`config-el.json` was deleted (user has free plan, free plan cannot call the TTS API). `POST /tts` returns `{"error": "ElevenLabs not configured"}`. The circuit breaker in `speakElevenLabs()` sets `elevenLabsDisabledUntil` for 5 minutes on any failure, so it doesn't retry on every answer.
+
+**To re-enable:** create `config-el.json` from `config-el.example.json` with a real key and voice id (requires a paid ElevenLabs plan).
+
+### Legend type filter
+
+`#legend` in bottom-left corner. Each item has `data-type` attribute and `cursor: pointer`.
+`toggleTypeFilter(type, color)`:
+- First click: scales matching nodes ×1.6, dims others to 0.3 opacity, zooms toward centroid (min distance 150 to avoid extreme zoom on single nodes like "Projects").
+- Same click again: deselects, restores original scales, zooms out with `Graph.zoomToFit(1600, 90)`.
+- `originalNodeScales` Map preserves the baseline scales before filtering.
+- `currentTypeFilter` tracks the active filter (only one at a time — multi-filter is deferred).
+
+### Chat bar
+
+- `<textarea id="question">` (auto-grow via `autoGrowQuestion()` on `input` event, max-height 120px).
+- `Enter` submits; `Shift+Enter` inserts newline.
+- Successful answers go to the **Log panel** (right side panel), NOT the floating answer box.
+- Floating `#answer-box` is reserved for errors and "outdated galaxy" warnings only.
+- Log auto-opens on the first message (`logAutoOpened` flag, one-time only).
+
+### Navigator's Log
+
+`localStorage` key `moai-log`, max 300 entries. Each entry: `{ts, type, question, answer, nodes, sources}`. Stars in the log are clickable (fly to node). Sources are filtered for `https?://` before rendering.
+
+### 3D galaxy
+
+`3d-force-graph` loaded from `esm.sh`. Key imports:
+```js
+import ForceGraph3D from 'https://esm.sh/3d-force-graph@1.73.3?deps=three@0.180.0'
+import * as THREE   from 'https://esm.sh/three@0.180.0'
+import { UnrealBloomPass } from 'https://esm.sh/three@0.180.0/examples/jsm/postprocessing/UnrealBloomPass.js?deps=three@0.180.0'
+```
+
+> **esm.sh, not unpkg.** unpkg's `.mjs` bundle doesn't include dependencies; esm.sh resolves them via `?deps=`. The `three` version in the import and in `?deps=` must match exactly, or nodes and sprites won't share the same Three.js instance.
+
+Bloom: `UnrealBloomPass(resolution, strength=0.9, radius=0.4, threshold=0.12)` added via `Graph.postProcessingComposer().addPass(bloomPass)`.
+
+### Slash commands
+
+Handled client-side in `handleSlashCommand()`:
+
+| Command | Action |
+|---|---|
+| `/remember <text>` | Opens save flow, calls `POST /remember` |
+| `/remember-edit <title>` | Opens edit flow |
+| `/list-notes [q]` | Lists notes (optional search) |
+| `/list-connectors` | Lists connectors |
+| `/list-tools` | Lists tools |
+| `/web-search <query>` | Falls through to `/chat` (server triggers web_search tool) |
+
+Command menu (`#slash-menu`) appears when the user types `/` in the textarea.
