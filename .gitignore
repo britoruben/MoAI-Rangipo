@@ -1,0 +1,40 @@
+# The API key lives here — never committed to git
+config.json
+config-el.json
+# Per-installation local state (language + addressed name) — never committed
+preferences.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+venv/
+.venv/
+env/
+
+# OS / Editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Personal notes and reflections — not the generic project template.
+# docs/ideas/, docs/examples/, docs/projects/example-*.md stay: they're
+# explicitly marked "example note — replace me" and ship with the repo.
+docs/captures/
+docs/moai-proyecto.md
+docs/preferencias-trabajo.md
+notes/
+
+# Local Claude Code permissions/allowlist — machine-specific, not shared config.
+.claude/settings.local.json
+.claude/launch.json
+
+# Private agent-context doc — not meant to be shared publicly.
+CLAUDE.md
+
+# Old prototypes, unreferenced by current code — kept locally, not published.
+images/_archive/

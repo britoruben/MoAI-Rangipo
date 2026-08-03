@@ -1,0 +1,10 @@
+{
+  "_comment": "Copy this file to config.json and paste your real key. config.json is in .gitignore — never commit it.",
+  "api_key": "your-anthropic-key-here",
+  "model": "claude-haiku-4-5",
+  "models": [
+    {"id": "claude-haiku-4-5",   "label": "Haiku 4.5 · fast"},
+    {"id": "claude-sonnet-4-6",  "label": "Sonnet 4.6 · balanced"},
+    {"id": "claude-opus-4-5",    "label": "Opus 4.5 · powerful"}
+  ]
+}

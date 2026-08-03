@@ -1,0 +1,6 @@
+{
+  "_comment": "Copy this file to config-el.json and paste your real ElevenLabs key + voice id. config-el.json is in .gitignore — never commit it. Optional: without it, Moai just falls back to the browser's own voice.",
+  "api_key": "your-elevenlabs-key-here",
+  "voice_id": "your-elevenlabs-voice-id-here",
+  "model_id": "eleven_multilingual_v2"
+}
