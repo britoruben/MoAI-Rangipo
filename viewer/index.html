@@ -1,0 +1,2653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MoAI — Galaxy</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --space: #060b0e;
+    --space-2: #0a1216;
+    --line: rgba(140, 180, 170, 0.14);
+    --text: #d8e2dd;
+    --text-dim: #7d938c;
+    --note: #8fae6f;
+    --connector: #45c4b0;
+    --tool: #c98a5e;
+    --project: #d9aa4b;
+    --idea: #f2e8d5;
+    /* Phase 15 — Moai's 5 states: standby/thinking/talking/tools/error */
+    --face-standby: #e8ede9;
+    --face-thinking: #e8c22e;
+    --face-talking: #4fa3e0;
+    --face-tools: #4caf6e;
+    --face-error: #e0554a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: var(--space); }
+  body {
+    font-family: "Segoe UI", system-ui, sans-serif;
+    color: var(--text);
+  }
+  #graph { position: absolute; inset: 0; }
+
+  /* ---------- Phase 15G: Isla de Pascua splash ---------- */
+  #splash {
+    position: fixed; inset: 0; z-index: 100;
+    background-image: url('/images/web.jpg');
+    background-size: cover;
+    background-position: center 42%;
+    background-color: var(--space);
+    display: flex; align-items: flex-end; justify-content: center;
+    padding-bottom: 64px;
+    opacity: 1;
+    transition: opacity 1.1s ease;
+  }
+  #splash::before {
+    content: ''; position: absolute; inset: 0;
+    background: linear-gradient(180deg,
+      rgba(6, 11, 14, 0) 35%, rgba(6, 11, 14, 0.55) 75%, rgba(6, 11, 14, 0.92) 100%);
+  }
+  #splash.hide { opacity: 0; pointer-events: none; }
+  #splash-label {
+    position: relative; z-index: 1;
+    font-family: Georgia, "Times New Roman", serif;
+    letter-spacing: 9px; font-size: 14px; color: #e8ede9;
+    text-transform: uppercase; text-shadow: 0 0 18px rgba(0, 0, 0, 0.6);
+    animation: splash-pulse 1.8s ease-in-out infinite;
+  }
+  @keyframes splash-pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 0.95; } }
+
+  /* ---------- header ---------- */
+  #header {
+    position: absolute; top: 26px; left: 32px; z-index: 10;
+    pointer-events: none; user-select: none;
+  }
+  #header h1 {
+    font-family: Georgia, "Times New Roman", serif;
+    font-weight: 400; font-size: 26px; letter-spacing: 10px;
+    color: var(--text);
+    text-shadow: 0 0 18px rgba(69, 196, 176, 0.35);
+  }
+  #header p {
+    margin-top: 6px; font-size: 12px; letter-spacing: 2px;
+    color: var(--text-dim); text-transform: uppercase;
+  }
+  #powers-toggle {
+    pointer-events: auto;
+    margin-top: 14px;
+    background: none;
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    border-radius: 999px;
+    padding: 6px 16px;
+    font-size: 11px; letter-spacing: 2px; text-transform: uppercase;
+    cursor: pointer;
+    transition: color 0.2s, border-color 0.2s;
+  }
+  #powers-toggle:hover { color: #7fe0d0; border-color: rgba(69, 196, 176, 0.4); }
+  /* with the panel open, the panel itself (z-index 25) covers this button
+     (z-index 10, inside #header) — without this it'd be a "ghost" button
+     that looks clickable but never receives the click. */
+  #powers-toggle.hidden-while-open { visibility: hidden; }
+
+  /* panel/scroll: the close button lives in the outer container (which
+     no longer scrolls) and the content in .panel-scroll — so the button
+     never scrolls out of view on a long panel. */
+  .panel-scroll { height: 100%; overflow-y: auto; }
+
+  /* ---------- powers panel (Phase 7) ---------- */
+  #powers-panel {
+    position: absolute; top: 0; left: 0; bottom: 0; z-index: 25;
+    width: min(380px, 90vw);
+    background: linear-gradient(180deg, rgba(8, 15, 18, 0.92), rgba(6, 11, 14, 0.96));
+    border-right: 1px solid var(--line);
+    backdrop-filter: blur(10px);
+    transform: translateX(-105%);
+    transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+    overflow: hidden;
+  }
+  #powers-panel.open { transform: translateX(0); }
+  #powers-panel .panel-scroll { padding: 44px 30px; }
+  #powers-panel h2 {
+    font-family: Georgia, "Times New Roman", serif;
+    font-weight: 400; font-size: 22px; margin-bottom: 20px;
+    color: var(--text);
+  }
+  #powers-panel .menu-intro {
+    color: var(--text-dim); font-size: 12px; line-height: 1.6;
+    margin: -10px 0 22px;
+  }
+  .runtime-card {
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+    margin: 0 0 20px; background: rgba(69, 196, 176, 0.04);
+  }
+  .runtime-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .runtime-label { font-size: 11px; letter-spacing: 1.8px; text-transform: uppercase; color: var(--text-dim); }
+  .runtime-state { font-size: 12px; color: #7fe0d0; margin-top: 4px; }
+  .runtime-state.dev { color: #e8c22e; }
+  .runtime-toggle, .dev-execute {
+    border: 1px solid rgba(69, 196, 176, 0.4); border-radius: 999px;
+    background: rgba(69, 196, 176, 0.08); color: #7fe0d0;
+    padding: 6px 10px; font-size: 10px; letter-spacing: 1px;
+    text-transform: uppercase; cursor: pointer;
+  }
+  .runtime-toggle.dev { border-color: rgba(232, 194, 46, 0.55); color: #e8c22e; background: rgba(232, 194, 46, 0.08); }
+  #dev-console { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+  #dev-console label { display: block; font-size: 10px; color: var(--text-dim); letter-spacing: 1.2px; text-transform: uppercase; margin: 10px 0 5px; }
+  #dev-operation, #dev-payload {
+    width: 100%; border: 1px solid var(--line); border-radius: 6px;
+    background: rgba(6, 11, 14, 0.8); color: var(--text);
+    font: 12px Consolas, monospace; padding: 8px;
+  }
+  #dev-payload { min-height: 118px; resize: vertical; line-height: 1.45; }
+  .dev-execute { margin-top: 10px; width: 100%; border-radius: 6px; }
+  #dev-result { white-space: pre-wrap; word-break: break-word; max-height: 190px; overflow: auto; color: var(--text-dim); font: 11px Consolas, monospace; line-height: 1.45; margin-top: 10px; }
+  #powers-close {
+    position: absolute; top: 18px; right: 20px;
+    background: none; border: none; color: var(--text-dim);
+    font-size: 22px; cursor: pointer; line-height: 1;
+    transition: color 0.2s;
+  }
+  #powers-close:hover { color: var(--text); }
+  .power-section {
+    font-size: 11px; letter-spacing: 2.5px; text-transform: uppercase;
+    color: var(--text-dim); margin: 18px 0 6px;
+  }
+  .power-section:first-of-type { margin-top: 0; }
+  .power-item {
+    display: flex; gap: 10px; align-items: flex-start;
+    padding: 9px 0; border-bottom: 1px solid var(--line);
+  }
+  .power-dot {
+    width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex-shrink: 0;
+  }
+  .power-dot.on { background: #45c4b0; box-shadow: 0 0 8px #45c4b0; }
+  .power-dot.off { background: #45605c; }
+  .power-name { font-size: 13px; color: var(--text); font-weight: 500; }
+  .power-desc {
+    font-size: 12px; color: var(--text-dim); line-height: 1.55; margin-top: 3px;
+  }
+  .power-soon {
+    font-size: 9px; letter-spacing: 1.5px; text-transform: uppercase;
+    color: #d9aa4b; margin-left: 7px; opacity: 0.85;
+  }
+  /* Phase 15E — Menu: clickable items insert a /command into the chatbar */
+  .power-item.clickable {
+    cursor: pointer; margin: 0 -12px; padding: 9px 12px;
+    border-radius: 8px; transition: background 0.15s;
+  }
+  .power-item.clickable:hover { background: rgba(69, 196, 176, 0.08); }
+  .power-item.clickable .power-name { color: #7fe0d0; }
+  .power-item.disabled { opacity: 0.38; cursor: not-allowed; pointer-events: none; }
+  .cmd-list { list-style: none; margin-top: 6px; }
+  .cmd-list li { padding: 4px 0; border-bottom: 1px solid var(--line); }
+  .cmd-list li:last-child { border-bottom: none; }
+
+  /* ---------- legend — now clickeable to filter nodes by type (Phase 15I) ---------- */
+  #legend {
+    position: absolute; bottom: 26px; left: 32px; z-index: 10;
+    display: flex; flex-direction: column; gap: 7px;
+    font-size: 12px; color: var(--text-dim);
+    user-select: none; pointer-events: auto;
+  }
+  #legend .item {
+    display: flex; align-items: center; gap: 9px;
+    cursor: pointer; padding: 4px 6px; border-radius: 4px;
+    transition: background 0.3s, color 0.3s;
+  }
+  #legend .item:hover { background: rgba(127, 224, 208, 0.08); color: var(--text); }
+  #legend .item.active {
+    background: rgba(127, 224, 208, 0.22); color: #fff;
+    padding: 6px 10px; font-weight: 600;
+  }
+  #legend .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    box-shadow: 0 0 8px currentColor;
+    transition: width 0.3s, height 0.3s, box-shadow 0.3s;
+  }
+  #legend .item.active .dot {
+    width: 12px; height: 12px;
+    box-shadow: 0 0 16px currentColor;
+  }
+
+  /* ---------- side panel ---------- */
+  #panel {
+    position: absolute; top: 0; right: 0; bottom: 0; z-index: 20;
+    width: min(400px, 90vw);
+    background: linear-gradient(180deg, rgba(8, 15, 18, 0.92), rgba(6, 11, 14, 0.96));
+    border-left: 1px solid var(--line);
+    backdrop-filter: blur(10px);
+    transform: translateX(105%);
+    transition: transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+    overflow: hidden;
+  }
+  #panel.open { transform: translateX(0); }
+  #panel .panel-scroll {
+    padding: 40px 34px;
+    display: flex; flex-direction: column; gap: 18px;
+  }
+  #panel .type {
+    align-self: flex-start;
+    font-size: 11px; letter-spacing: 3px; text-transform: uppercase;
+    padding: 5px 12px; border-radius: 999px;
+    border: 1px solid currentColor;
+    opacity: 0.9;
+  }
+  #panel h2 {
+    font-family: Georgia, "Times New Roman", serif;
+    font-weight: 400; font-size: 24px; line-height: 1.3;
+    color: var(--text);
+  }
+  #panel .path { font-size: 11px; color: var(--text-dim); letter-spacing: 1px; }
+  #panel .excerpt {
+    font-size: 14px; line-height: 1.75; color: #b9c7c1;
+    border-top: 1px solid var(--line); padding-top: 18px;
+  }
+  #panel .neighbors { font-size: 12px; color: var(--text-dim); line-height: 1.9; }
+  #panel .neighbors b { color: var(--text); font-weight: 500; }
+
+  /* ---------- Phase 12: edit mode ---------- */
+  #panel-editor {
+    display: none;
+    width: 100%; box-sizing: border-box;
+    min-height: 220px; resize: vertical;
+    background: var(--space-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: 12px; font-size: 13px; font-family: monospace;
+    line-height: 1.6; margin-top: 14px;
+  }
+  #panel-edit-actions {
+    display: none; gap: 8px; margin-top: 10px;
+  }
+  #panel-edit-row {
+    margin-top: 14px; display: none;
+  }
+  #save-edit, #cancel-edit, #edit-note {
+    padding: 6px 16px; border-radius: 5px; border: none;
+    cursor: pointer; font-size: 12px; letter-spacing: 0.5px;
+    transition: opacity 0.15s;
+  }
+  #save-edit  { background: var(--note); color: #000; }
+  #cancel-edit { background: var(--line); color: var(--text); }
+  #edit-note  { background: transparent; color: var(--text-dim);
+                border: 1px solid var(--line); }
+  #save-edit:hover, #cancel-edit:hover, #edit-note:hover { opacity: 0.75; }
+
+  #close {
+    position: absolute; top: 18px; right: 20px;
+    background: none; border: none; color: var(--text-dim);
+    font-size: 22px; cursor: pointer; line-height: 1;
+    transition: color 0.2s;
+  }
+  #close:hover { color: var(--text); }
+
+  /* ---------- bottom hint ---------- */
+  #hint {
+    position: absolute; bottom: 26px; right: 32px; z-index: 10;
+    font-size: 11px; letter-spacing: 2px; color: var(--text-dim);
+    text-transform: uppercase; user-select: none; pointer-events: none;
+    opacity: 0.7;
+  }
+
+  /* ---------- chat: la Mente ---------- */
+  #chat {
+    position: absolute; bottom: 70px; left: 50%; transform: translateX(-50%);
+    z-index: 15; width: min(700px, 92vw);
+    display: flex; flex-direction: column; gap: 10px;
+    pointer-events: none;
+  }
+  #answer {
+    pointer-events: auto;
+    display: none;
+    background: linear-gradient(180deg, rgba(10, 18, 22, 0.88), rgba(6, 11, 14, 0.92));
+    border: 1px solid rgba(69, 196, 176, 0.25);
+    border-radius: 14px;
+    padding: 16px 20px;
+    font-size: 14px; line-height: 1.7; color: #cfe0da;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+    max-height: min(340px, 45vh);
+    overflow-y: auto;
+  }
+  #answer.visible { display: block; }
+  #answer.error { border-color: rgba(217, 170, 75, 0.5); color: #e0c98a; }
+  #answer .meta {
+    margin-top: 8px; font-size: 11px; letter-spacing: 1.5px;
+    text-transform: uppercase; color: var(--text-dim);
+  }
+  #answer .sources {
+    margin-top: 10px; padding-top: 10px;
+    border-top: 1px solid var(--line);
+    display: flex; flex-direction: column; gap: 5px;
+  }
+  #answer .sources a {
+    font-size: 12px; color: #7fe0d0; text-decoration: none;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #answer .sources a:hover { text-decoration: underline; }
+  #status {
+    display: none;
+    font-size: 11px; letter-spacing: 2.5px; text-transform: uppercase;
+    color: #7fe0d0; text-align: center;
+    text-shadow: 0 0 12px rgba(69, 196, 176, 0.4);
+  }
+  #chatbar {
+    pointer-events: auto;
+    display: flex; align-items: flex-end; gap: 8px;
+    background: linear-gradient(180deg, rgba(10, 18, 22, 0.85), rgba(6, 11, 14, 0.92));
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 8px 10px 8px 22px;
+    backdrop-filter: blur(8px);
+    transition: border-color 0.3s;
+  }
+  #chatbar:focus-within {
+    border-color: rgba(69, 196, 176, 0.45);
+    box-shadow: 0 0 24px rgba(69, 196, 176, 0.12);
+  }
+  #question {
+    flex: 1; background: none; border: none; outline: none;
+    color: var(--text); font-size: 14px;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    /* Phase 15F: grows with content instead of clipping long questions */
+    resize: none; overflow-y: auto; max-height: 120px;
+    line-height: 1.4; padding: 8px 0;
+  }
+  #question::placeholder { color: var(--text-dim); }
+  #model {
+    background: none; border: none; outline: none;
+    color: var(--text-dim); font-size: 12px;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    cursor: pointer; max-width: 170px;
+    text-align: right;
+  }
+  #model:hover { color: var(--text); }
+  #model option { background: #0a1216; color: var(--text); }
+  .iconbtn {
+    background: none;
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    border-radius: 999px;
+    width: 36px; height: 36px;
+    font-size: 15px; line-height: 1;
+    cursor: pointer;
+    transition: color 0.2s, border-color 0.2s, background 0.2s;
+    flex-shrink: 0;
+  }
+  .iconbtn:hover { color: var(--text); border-color: rgba(69, 196, 176, 0.4); }
+  #mic.listening {
+    color: #7fe0d0;
+    border-color: rgba(69, 196, 176, 0.7);
+    animation: listen-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes listen-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(69, 196, 176, 0.35); }
+    50%      { box-shadow: 0 0 0 9px rgba(69, 196, 176, 0); }
+  }
+  /* Phase 15D — hands-free conversation mode: on while the toggle is
+     active, regardless of whether the mic happens to be listening right
+     this instant (that's #mic.listening's own pulse, layered on top) */
+  #conv-mode.active {
+    color: #7fe0d0;
+    border-color: rgba(69, 196, 176, 0.7);
+    background: rgba(69, 196, 176, 0.14);
+  }
+  #ask {
+    background: rgba(69, 196, 176, 0.14);
+    border: 1px solid rgba(69, 196, 176, 0.35);
+    color: #7fe0d0;
+    border-radius: 999px;
+    padding: 7px 18px;
+    font-size: 13px; letter-spacing: 1px;
+    cursor: pointer;
+    transition: background 0.2s;
+    flex-shrink: 0;
+  }
+  #ask:hover { background: rgba(69, 196, 176, 0.28); }
+  #ask:disabled { opacity: 0.4; cursor: wait; }
+
+  /* ---------- Phase 11: voice picker ---------- */
+  #voice-pick {
+    background: none; border: none; outline: none;
+    color: var(--text-dim); font-size: 11px;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    cursor: pointer; max-width: 108px; display: none;
+  }
+  #voice-pick:hover { color: var(--text); }
+  #voice-pick option { background: #0a1216; color: var(--text); }
+
+  /* ---------- Phase 16: language toggle ---------- */
+  #lang-pick {
+    background: none; border: 1px solid var(--line); border-radius: 999px;
+    outline: none; color: var(--text-dim); font-size: 11px;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    cursor: pointer; padding: 4px 8px;
+  }
+  #lang-pick:hover { color: var(--text); }
+  #lang-pick option { background: #0a1216; color: var(--text); }
+
+  /* ---------- Phase 16: first-run language prompt ---------- */
+  #lang-prompt {
+    position: fixed; inset: 0; z-index: 110;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(6, 11, 14, 0.72); backdrop-filter: blur(6px);
+    opacity: 1; transition: opacity 0.5s ease;
+  }
+  #lang-prompt.hide { opacity: 0; pointer-events: none; }
+  #lang-prompt[hidden] { display: none; }
+  #lang-prompt-card {
+    width: min(340px, 88vw);
+    border: 1px solid var(--line); border-radius: 12px;
+    background: linear-gradient(180deg, rgba(8, 15, 18, 0.96), rgba(6, 11, 14, 0.98));
+    padding: 28px 26px; text-align: center;
+  }
+  #lang-prompt-card h2 {
+    font-family: Georgia, "Times New Roman", serif;
+    font-weight: 400; font-size: 19px; margin-bottom: 8px; color: var(--text);
+  }
+  #lang-prompt-card p {
+    font-size: 12px; color: var(--text-dim); line-height: 1.6; margin-bottom: 18px;
+  }
+  #lang-prompt-name {
+    width: 100%; border: 1px solid var(--line); border-radius: 6px;
+    background: rgba(6, 11, 14, 0.8); color: var(--text);
+    padding: 9px 10px; font-size: 13px; margin-bottom: 16px; outline: none;
+  }
+  #lang-prompt-name:focus { border-color: rgba(69, 196, 176, 0.5); }
+  .lang-prompt-buttons { display: flex; gap: 10px; }
+  .lang-prompt-buttons button {
+    flex: 1; border: 1px solid rgba(69, 196, 176, 0.4); border-radius: 999px;
+    background: rgba(69, 196, 176, 0.08); color: #7fe0d0;
+    padding: 9px 10px; font-size: 12px; letter-spacing: 0.5px;
+    cursor: pointer;
+  }
+  .lang-prompt-buttons button:hover { background: rgba(69, 196, 176, 0.18); }
+
+  /* ---------- Phase 10: log toggle button ---------- */
+  #log-toggle {
+    pointer-events: auto; display: block;
+    margin-top: 8px;
+    background: none; border: 1px solid var(--line);
+    color: var(--text-dim); border-radius: 999px;
+    padding: 6px 16px;
+    font-size: 11px; letter-spacing: 2px; text-transform: uppercase;
+    cursor: pointer; transition: color 0.2s, border-color 0.2s;
+  }
+  #log-toggle:hover { color: #7fe0d0; border-color: rgba(69, 196, 176, 0.4); }
+
+  /* ---------- Phase 10: panel tab bar ---------- */
+  #panel { display: flex; flex-direction: column; }
+  #panel-tabbar {
+    display: flex; flex-shrink: 0;
+    border-bottom: 1px solid var(--line);
+    padding: 0 20px; margin-top: 52px; /* room for ✕ button */
+  }
+  .ptab {
+    background: none; border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-dim); font-size: 11px;
+    letter-spacing: 2px; text-transform: uppercase;
+    padding: 10px 12px 9px; cursor: pointer;
+    transition: color 0.2s, border-color 0.2s;
+  }
+  .ptab.active { color: #45c4b0; border-bottom-color: #45c4b0; }
+  .ptab:hover:not(.active) { color: var(--text); }
+  #tab-node, #tab-log { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; overflow: hidden; }
+  .tab-content .panel-scroll { flex: 1; height: 100%; overflow-y: auto; }
+
+  /* ---------- Phase 10: doc viewer ---------- */
+  #doc-view { display: none; }
+  #doc-view-row { margin-top: 14px; display: none; }
+  #doc-back, #view-full-doc {
+    padding: 6px 16px; border-radius: 5px; border: none;
+    cursor: pointer; font-size: 12px; letter-spacing: 0.5px;
+    transition: opacity 0.15s;
+    background: transparent; color: var(--text-dim);
+    border: 1px solid var(--line);
+  }
+  #doc-back { margin-bottom: 14px; }
+  #doc-back:hover, #view-full-doc:hover { opacity: 0.75; }
+  #doc-content {
+    font-size: 13px; line-height: 1.75; color: #b9c7c1;
+    border-top: 1px solid var(--line); padding-top: 14px;
+  }
+  #doc-content h1, #doc-content h2, #doc-content h3 {
+    font-family: Georgia, serif; font-weight: 400;
+    color: var(--text); margin: 18px 0 8px;
+  }
+  #doc-content h1 { font-size: 20px; }
+  #doc-content h2 { font-size: 17px; }
+  #doc-content h3 { font-size: 14px; }
+  #doc-content p { margin-bottom: 10px; }
+  #doc-content code {
+    background: rgba(69,196,176,0.1); border-radius: 3px;
+    padding: 1px 5px; font-size: 12px;
+  }
+  #doc-content pre {
+    background: rgba(6,11,14,0.8); border: 1px solid var(--line);
+    border-radius: 6px; padding: 12px; overflow-x: auto;
+    margin: 10px 0;
+  }
+  #doc-content pre code { background: none; padding: 0; }
+  #doc-content a { color: #45c4b0; }
+  .mermaid-wrap { position: relative; margin: 12px 0; }
+  .mermaid-dl {
+    position: absolute; top: 6px; right: 6px;
+    background: rgba(6,11,14,0.8); border: 1px solid var(--line);
+    color: var(--text-dim); border-radius: 4px;
+    padding: 3px 8px; font-size: 10px; cursor: pointer;
+  }
+  .mermaid-dl:hover { color: var(--text); }
+
+  /* ---------- Phase 10: log tab ---------- */
+  #log-header-row {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  #log-header-row h2 {
+    font-family: Georgia, serif; font-weight: 400; font-size: 18px;
+    color: var(--text);
+  }
+  #log-clear {
+    background: none; border: 1px solid var(--line); color: var(--text-dim);
+    border-radius: 4px; padding: 4px 10px; font-size: 10px;
+    letter-spacing: 1px; cursor: pointer; text-transform: uppercase;
+  }
+  #log-clear:hover { color: var(--text); }
+  .log-entry { padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .log-entry:first-child { border-top: 1px solid var(--line); }
+  .log-ts { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-dim); margin-bottom: 5px; }
+  .log-q { font-size: 12px; font-weight: 500; color: var(--text); margin-bottom: 6px; }
+  .log-a { font-size: 13px; line-height: 1.6; color: #b9c7c1; }
+  .log-stars { margin-top: 8px; font-size: 12px; color: var(--text-dim); line-height: 1.8; }
+  .log-star { color: #45c4b0; cursor: pointer; }
+  .log-star:hover { text-decoration: underline; }
+  .log-sources { margin-top: 6px; font-size: 11px; }
+  .log-sources a { color: #7fe0d0; text-decoration: none; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .log-sources a:hover { text-decoration: underline; }
+  #log-empty { color: var(--text-dim); font-size: 13px; text-align: center; padding-top: 40px; }
+
+  /* ---------- Phase 9/15: Aringa Ora (living face) — 5 states ---------- */
+  #moai-face {
+    position: absolute; top: 92px; left: 50%; transform: translateX(-50%); z-index: 10;
+    width: 180px; height: 270px;
+    pointer-events: none; user-select: none;
+    opacity: 1; transition: opacity 1.2s ease;
+  }
+  /* standby: almost fully transparent, like it's part of the starfield —
+     any other state (listening/thinking/tools/talking/error) brings the
+     whole photo+glyphs back to full visibility */
+  #moai-face.s-idle { opacity: 0.1; }
+  #moai-photo {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover; object-position: top center;
+    filter: grayscale(0.88) sepia(0.4) hue-rotate(135deg) brightness(0.55) saturate(2.2);
+    -webkit-mask-image: radial-gradient(ellipse 90% 96% at 48% 42%, black 52%, transparent 100%);
+    mask-image: radial-gradient(ellipse 90% 96% at 48% 42%, black 52%, transparent 100%);
+  }
+  #moai-svg {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    overflow: visible; pointer-events: none;
+  }
+
+  /* petroglyph elements — shared shape, color/opacity driven by state below */
+  #moai-svg .eye-l, #moai-svg .eye-r {
+    fill: none; stroke: var(--face-standby); stroke-width: 1.5;
+    opacity: 0.09; transition: opacity 0.5s, stroke 0.5s, stroke-width 0.5s, filter 0.5s;
+  }
+  #moai-svg .mouth {
+    fill: none; stroke: var(--face-standby); stroke-width: 1.8; stroke-linecap: round;
+    opacity: 0.08; transition: opacity 0.15s, stroke-width 0.15s, stroke 0.3s, filter 0.3s;
+  }
+  #moai-svg .nose-mark { fill: none; stroke: #8fae6f; stroke-width: 1; opacity: 0.05; }
+  #moai-svg .chest-ring, #moai-svg .glyph-accent {
+    fill: none; stroke: var(--face-standby); stroke-width: 1.2; opacity: 0.05;
+    transition: opacity 0.5s, stroke 0.5s;
+  }
+  /* filled centre of the chest ring — same colour language, via fill not stroke */
+  #moai-svg .chest-ring-fill {
+    stroke: none; fill: var(--face-standby); opacity: 0.05;
+    transition: opacity 0.5s, fill 0.5s;
+  }
+  /* pupils: a filled dot inside each eye — "spark of life" */
+  #moai-svg .eye-pupil {
+    stroke: none; fill: var(--face-standby); opacity: 0.08;
+    transition: opacity 0.4s, fill 0.4s;
+  }
+  /* thin outline tracing the visible photo area */
+  #moai-svg .face-outline {
+    fill: none; stroke: var(--face-standby); stroke-width: 0.5; opacity: 0.08;
+    transition: opacity 0.6s, stroke 0.6s;
+  }
+
+  /* standby: slow breath, soft white */
+  @keyframes moai-idle  { 0%,100% { opacity: 0.12; } 50% { opacity: 0.22; } }
+  @keyframes moai-idle2 { 0%,100% { opacity: 0.06; } 50% { opacity: 0.12; } }
+  @keyframes moai-glow  { 0%,100% { opacity: 0.65; } 50% { opacity: 1.0; } }
+  @keyframes moai-pulse { 0%,100% { opacity: 0.55; } 50% { opacity: 0.95; } }
+
+  #moai-face.s-idle .eye-l, #moai-face.s-idle .eye-r { animation: moai-idle 3.2s ease-in-out infinite; }
+  #moai-face.s-idle .eye-pupil { animation: moai-idle 3.2s ease-in-out infinite; }
+  #moai-face.s-idle .mouth { animation: moai-idle 4s ease-in-out infinite; }
+  #moai-face.s-idle .chest-ring, #moai-face.s-idle .glyph-accent { animation: moai-idle2 5s ease-in-out infinite; }
+  #moai-face.s-idle .chest-ring-fill { animation: moai-idle2 5s ease-in-out infinite; }
+  #moai-face.s-idle .face-outline { animation: moai-idle2 5s ease-in-out infinite; }
+
+  /* listening: mic active — a cyan cue distinct from the 5 states, since
+     it's about input capture, not Moai's own thinking/talking/tools/error */
+  #moai-face.s-listening .eye-l, #moai-face.s-listening .eye-r {
+    stroke: #45c4b0; stroke-width: 2; opacity: 0.8;
+    filter: drop-shadow(0 0 4px #45c4b0);
+    animation: moai-glow 1.1s ease-in-out infinite;
+  }
+  #moai-face.s-listening .chest-ring, #moai-face.s-listening .glyph-accent { opacity: 0.3; stroke: #45c4b0; animation: moai-glow 1.5s ease-in-out infinite; }
+  #moai-face.s-listening .chest-ring-fill { opacity: 0.3; fill: #45c4b0; animation: moai-glow 1.5s ease-in-out infinite; }
+  #moai-face.s-listening .eye-pupil { opacity: 0.8; fill: #45c4b0; animation: moai-glow 1.1s ease-in-out infinite; }
+  #moai-face.s-listening .face-outline { opacity: 0.3; stroke: #45c4b0; animation: moai-glow 1.5s ease-in-out infinite; }
+
+  /* thinking: yellow — consulting the oracle */
+  #moai-face.s-thinking .eye-l, #moai-face.s-thinking .eye-r {
+    stroke: var(--face-thinking); stroke-width: 1.8; opacity: 0.7;
+    filter: drop-shadow(0 0 4px var(--face-thinking));
+    animation: moai-pulse 1.9s ease-in-out infinite;
+  }
+  #moai-face.s-thinking .mouth { opacity: 0.18; stroke: var(--face-thinking); }
+  #moai-face.s-thinking .chest-ring, #moai-face.s-thinking .glyph-accent { opacity: 0.22; stroke: var(--face-thinking); animation: moai-pulse 2.4s ease-in-out infinite; }
+  #moai-face.s-thinking .chest-ring-fill { opacity: 0.22; fill: var(--face-thinking); animation: moai-pulse 2.4s ease-in-out infinite; }
+  #moai-face.s-thinking .eye-pupil { opacity: 0.7; fill: var(--face-thinking); animation: moai-pulse 1.9s ease-in-out infinite; }
+  #moai-face.s-thinking .face-outline { opacity: 0.22; stroke: var(--face-thinking); animation: moai-pulse 2.4s ease-in-out infinite; }
+
+  /* tools: green — using a tool (web search, save/delete note, connectors…) */
+  #moai-face.s-tools .eye-l, #moai-face.s-tools .eye-r {
+    stroke: var(--face-tools); stroke-width: 1.8; opacity: 0.7;
+    filter: drop-shadow(0 0 5px var(--face-tools));
+    animation: moai-pulse 1.5s ease-in-out infinite;
+  }
+  #moai-face.s-tools .mouth { opacity: 0.18; stroke: var(--face-tools); }
+  #moai-face.s-tools .chest-ring, #moai-face.s-tools .glyph-accent { opacity: 0.25; stroke: var(--face-tools); animation: moai-pulse 2s ease-in-out infinite; }
+  #moai-face.s-tools .chest-ring-fill { opacity: 0.25; fill: var(--face-tools); animation: moai-pulse 2s ease-in-out infinite; }
+  #moai-face.s-tools .eye-pupil { opacity: 0.7; fill: var(--face-tools); animation: moai-pulse 1.5s ease-in-out infinite; }
+  #moai-face.s-tools .face-outline { opacity: 0.25; stroke: var(--face-tools); animation: moai-pulse 2s ease-in-out infinite; }
+
+  /* talking: blue — speaking the answer; everything glows like thinking/tools,
+     but the mouth reacts to word boundaries (mouth-active) */
+  #moai-face.s-talking .eye-l, #moai-face.s-talking .eye-r {
+    stroke: var(--face-talking); stroke-width: 1.8; opacity: 0.7;
+    filter: drop-shadow(0 0 4px var(--face-talking));
+    animation: moai-pulse 2.2s ease-in-out infinite;
+  }
+  #moai-face.s-talking .mouth { opacity: 0.45; stroke: var(--face-talking); stroke-width: 2.0; filter: drop-shadow(0 0 3px var(--face-talking)); }
+  #moai-face.s-talking .mouth.mouth-active { opacity: 1.0; stroke-width: 3.0; filter: drop-shadow(0 0 7px var(--face-talking)); }
+  #moai-face.s-talking .chest-ring, #moai-face.s-talking .glyph-accent { opacity: 0.28; stroke: var(--face-talking); animation: moai-idle2 2.2s ease-in-out infinite; }
+  #moai-face.s-talking .chest-ring-fill { opacity: 0.28; fill: var(--face-talking); animation: moai-idle2 2.2s ease-in-out infinite; }
+  #moai-face.s-talking .eye-pupil { opacity: 0.7; fill: var(--face-talking); animation: moai-pulse 2.2s ease-in-out infinite; }
+  #moai-face.s-talking .face-outline { opacity: 0.28; stroke: var(--face-talking); animation: moai-idle2 2.2s ease-in-out infinite; }
+
+  /* error: red — something went wrong */
+  #moai-face.s-error .eye-l, #moai-face.s-error .eye-r {
+    stroke: var(--face-error); stroke-width: 2; opacity: 0.85;
+    filter: drop-shadow(0 0 6px var(--face-error));
+    animation: moai-pulse 0.9s ease-in-out infinite;
+  }
+  #moai-face.s-error .mouth { opacity: 0.3; stroke: var(--face-error); stroke-width: 2.2; }
+  #moai-face.s-error .chest-ring, #moai-face.s-error .glyph-accent { opacity: 0.35; stroke: var(--face-error); animation: moai-pulse 1.1s ease-in-out infinite; }
+  #moai-face.s-error .eye-pupil { opacity: 0.85; fill: var(--face-error); animation: moai-pulse 0.9s ease-in-out infinite; }
+  #moai-face.s-error .face-outline { opacity: 0.35; stroke: var(--face-error); animation: moai-pulse 1.1s ease-in-out infinite; }
+  #moai-face.s-error .chest-ring-fill { opacity: 0.35; fill: var(--face-error); animation: moai-pulse 1.1s ease-in-out infinite; }
+</style>
+</head>
+<body>
+
+<div id="splash"><div id="splash-label">Iorana…</div></div>
+
+<div id="lang-prompt" hidden>
+  <div id="lang-prompt-card">
+    <h2>Iorana.</h2>
+    <p>How should Moai address you, and in which language?<br>
+       ¿Cómo debería llamarte Moai, y en qué idioma?</p>
+    <input id="lang-prompt-name" type="text" placeholder="Matatoa" autocomplete="off">
+    <div class="lang-prompt-buttons">
+      <button id="lang-prompt-es" type="button">Español</button>
+      <button id="lang-prompt-en" type="button">English</button>
+    </div>
+  </div>
+</div>
+
+<div id="graph"></div>
+
+<div id="header">
+  <h1>M O A I</h1>
+  <p id="subtitle">waking up…</p>
+  <button id="powers-toggle" title="Moai's menu">⟡ Menu</button>
+  <button id="log-toggle" title="conversation log">☰ Log</button>
+</div>
+
+<div id="legend"></div>
+<div id="hint">click a star to fly to it</div>
+
+<aside id="powers-panel">
+  <button id="powers-close" title="close">×</button>
+  <div class="panel-scroll">
+    <h2>Actions</h2>
+    <p class="menu-intro">Actions, CRUD operations, and a controlled local Dev runtime.</p>
+    <div class="runtime-card">
+      <div class="runtime-row">
+        <div>
+          <div class="runtime-label">Runtime</div>
+          <div id="runtime-state" class="runtime-state">Production · external AI enabled</div>
+        </div>
+        <button id="runtime-toggle" class="runtime-toggle" type="button">Enable Dev</button>
+      </div>
+      <div id="dev-console" hidden>
+        <div class="runtime-state dev">DEV · local files only · no Anthropic/web</div>
+        <label for="dev-operation">Local operation</label>
+        <select id="dev-operation">
+          <option value="notes.list">Notes · list/search</option>
+          <option value="notes.read">Notes · read file</option>
+          <option value="notes.create">Notes · create</option>
+          <option value="notes.update">Notes · update</option>
+          <option value="notes.delete">Notes · delete</option>
+          <option value="connectors.list">Connectors · list</option>
+          <option value="connectors.create">Connectors · create</option>
+          <option value="connectors.update">Connectors · update</option>
+          <option value="connectors.delete">Connectors · delete</option>
+          <option value="tools.list">Tools · list</option>
+          <option value="tools.create">Tools · create</option>
+          <option value="tools.update">Tools · update</option>
+          <option value="tools.delete">Tools · delete</option>
+          <option value="graph.rebuild">Galaxy · rebuild graph</option>
+        </select>
+        <label for="dev-payload">Payload JSON</label>
+        <textarea id="dev-payload" spellcheck="false"></textarea>
+        <button id="dev-execute" class="dev-execute" type="button">Execute locally</button>
+        <pre id="dev-result"></pre>
+      </div>
+    </div>
+    <div class="runtime-card">
+      <div class="runtime-row">
+        <div>
+          <div class="runtime-label">Addressed name</div>
+          <div id="prefs-name-state" class="runtime-state">Matatoa</div>
+        </div>
+        <button id="prefs-name-edit" class="runtime-toggle" type="button">Edit</button>
+      </div>
+      <div id="prefs-name-form" hidden style="margin-top: 10px;">
+        <input id="prefs-name-input" type="text" placeholder="Matatoa" autocomplete="off"
+               style="width: 100%; border: 1px solid var(--line); border-radius: 6px; background: rgba(6, 11, 14, 0.8); color: var(--text); padding: 8px 10px; font-size: 12px; outline: none;">
+        <button id="prefs-name-save" class="runtime-toggle" type="button" style="margin-top: 8px;">Save</button>
+      </div>
+    </div>
+    <div id="powers-list"></div>
+  </div>
+</aside>
+
+<div id="chat">
+  <div id="answer"></div>
+  <div id="status"></div>
+  <div id="chatbar">
+    <textarea id="question" rows="1" autocomplete="off"
+           placeholder="…"></textarea>
+    <select id="model" title="AI model"></select>
+    <select id="voice-pick" title="voice"></select>
+    <select id="lang-pick" title="language">
+      <option value="es">ES</option>
+      <option value="en">EN</option>
+    </select>
+    <button id="mic" class="iconbtn" title="talk to Moai">🎙</button>
+    <button id="conv-mode" class="iconbtn" title="conversation mode (hands-free)">🔁</button>
+    <button id="voice" class="iconbtn" title="Moai's voice"></button>
+    <button id="ask">ask</button>
+  </div>
+</div>
+
+<aside id="panel">
+  <button id="close" title="close">×</button>
+  <div id="panel-tabbar">
+    <button class="ptab active" id="ptab-node" data-tab="node">Node</button>
+    <button class="ptab"        id="ptab-log"  data-tab="log">Log</button>
+  </div>
+
+  <!-- NODE TAB -->
+  <div id="tab-node" class="tab-content">
+    <div class="panel-scroll">
+      <span class="type" id="panel-type"></span>
+      <h2 id="panel-label"></h2>
+      <div class="path" id="panel-path"></div>
+      <div class="excerpt" id="panel-excerpt"></div>
+      <!-- Phase 10: full doc view -->
+      <div id="doc-view">
+        <button id="doc-back">← excerpt</button>
+        <div id="doc-content"></div>
+      </div>
+      <div id="doc-view-row">
+        <button id="view-full-doc">View full doc</button>
+      </div>
+      <!-- Phase 12: edit mode -->
+      <textarea id="panel-editor" placeholder="Edit note…"></textarea>
+      <div id="panel-edit-actions">
+        <button id="save-edit">Save</button>
+        <button id="cancel-edit">Cancel</button>
+      </div>
+      <div id="panel-edit-row">
+        <button id="edit-note">Edit</button>
+      </div>
+      <div class="neighbors" id="panel-neighbors"></div>
+    </div>
+  </div>
+
+  <!-- LOG TAB -->
+  <div id="tab-log" class="tab-content" style="display:none">
+    <div class="panel-scroll">
+      <div id="log-header-row">
+        <h2>Navigator's Log</h2>
+        <button id="log-clear">clear</button>
+      </div>
+      <div id="log-entries"></div>
+      <div id="log-empty">No conversations yet.<br>Ask Moai something to start.</div>
+    </div>
+  </div>
+</aside>
+
+<!-- Phase 9: Aringa Ora — the Living Face -->
+<div id="moai-face" class="s-idle">
+  <img id="moai-photo" src="/images/moai-clean.png" alt="Moai guardian">
+  <svg id="moai-svg" viewBox="0 0 72 108" preserveAspectRatio="none">
+    <!-- Eyes: photo is 640x1513px; object-fit:cover scales it ×0.1125 to
+         fill the container's width, cropping to the top ~63.5% (object-
+         position:top) — so viewBox units = real photo pixels × 0.1125.
+         The brow ridge sits at ~4-12% of the photo's height, the eye
+         sockets right under it at ~12-19%. -->
+    <rect class="eye-l" x="16" y="16" width="10" height="5" rx="2.5"/>
+    <rect class="eye-r" x="40" y="16" width="10" height="5" rx="2.5"/>
+    <!-- Pupils: a filled dot at the centre of each eye — the "spark of life" -->
+    <circle class="eye-pupil" cx="21" cy="18.5" r="1.5"/>
+    <circle class="eye-pupil" cx="45" cy="18.5" r="1.5"/>
+    <!-- Nose ridge: brow to nose tip, ~15-24% of the photo's height -->
+    <line class="nose-mark" x1="36" y1="26" x2="35" y2="36"/>
+    <!-- Mouth: minimal, straight, robot-style slit — shifted right, smaller -->
+    <line class="mouth" x1="27" y1="47" x2="39" y2="47"/>
+    <!-- Chest petroglyphs: a ring motif (with a filled centre) plus two
+         rongorongo-style marks -->
+    <circle class="chest-ring" cx="36" cy="97" r="6"/>
+    <circle class="chest-ring-fill" cx="36" cy="97" r="3"/>
+    <line  class="chest-ring" x1="36" y1="91" x2="36" y2="86"/>
+    <line class="glyph-accent" x1="27" y1="100" x2="27" y2="106"/>
+    <line class="glyph-accent" x1="45" y1="100" x2="45" y2="106"/>
+    <!-- Thin outline tracing the visible photo area -->
+    <rect class="face-outline" x="0" y="-10" width="66" height="120" rx="8"/>
+  </svg>
+</div>
+
+<script src="graph-data.js"></script>
+
+<script type="module">
+// esm.sh resolves the dependencies; ?deps pins three to the SAME version
+// we import below, so the graph and sprites share the same instance.
+import ForceGraph3D from 'https://esm.sh/3d-force-graph@1.77.0?deps=three@0.180.0';
+import * as THREE from 'https://esm.sh/three@0.180.0';
+import { UnrealBloomPass } from 'https://esm.sh/three@0.180.0/examples/jsm/postprocessing/UnrealBloomPass.js?deps=three@0.180.0';
+
+/* ---------- palette by type ---------- */
+const COLORS = {
+  note:      '#8fae6f',
+  connector: '#45c4b0',
+  tool:      '#c98a5e',
+  project:   '#d9aa4b',
+  idea:      '#f2e8d5'
+};
+const TYPE_NAME = {
+  note: 'note', connector: 'connector', tool: 'tool',
+  project: 'project', idea: 'idea'
+};
+
+/* ---------- live data (Phase 6 swaps it in on the fly) ---------- */
+let DATA = GRAPH;
+
+/* Phase 16: declared this early (not down with the rest of the Phase 16
+   block) because pickVoice() reads PREFS.lang and gets called synchronously
+   at page load, before the rest of that block runs — declaring it later
+   left PREFS in the temporal dead zone and threw on every load, silently
+   killing the whole script (splash never hid, nothing after it ran). */
+let PREFS = { lang: null, name: null };
+
+/* ---------- legend + subtitle ---------- */
+const legendEl = document.getElementById('legend');
+const subtitleEl = document.getElementById('subtitle');
+let currentTypeFilter = null;
+
+function refreshLegend() {
+  const counts = {};
+  DATA.nodes.forEach(n => counts[n.type] = (counts[n.type] || 0) + 1);
+  legendEl.innerHTML = '';
+  Object.entries(COLORS).forEach(([type, color]) => {
+    if (!counts[type]) return;
+    const div = document.createElement('div');
+    div.className = `item${currentTypeFilter === type ? ' active' : ''}`;
+    div.dataset.type = type;  // Phase 15I: clickeable filter
+    div.innerHTML = `<span class="dot" style="color:${color};background:${color}"></span>
+                     ${TYPE_NAME[type]}s · ${counts[type]}`;
+    div.addEventListener('click', () => toggleTypeFilter(type));
+    legendEl.appendChild(div);
+  });
+  subtitleEl.textContent =
+    `${DATA.nodes.length} stars kept safe in the sky`;
+}
+refreshLegend();
+
+/* ---------- neighborhood (for highlighting) ---------- */
+function computeNeighbors(data) {
+  const map = new Map();
+  data.nodes.forEach(n => map.set(n.id, new Set()));
+  data.links.forEach(l => {
+    const [s, t] = linkEndpoints(l);
+    map.get(s).add(t);
+    map.get(t).add(s);
+  });
+  return map;
+}
+function linkEndpoints(l) {
+  return [
+    typeof l.source === 'object' ? l.source.id : l.source,
+    typeof l.target === 'object' ? l.target.id : l.target
+  ];
+}
+let neighbors = computeNeighbors(DATA);
+
+/* ---------- highlight state ---------- */
+let focusNode = null;      // node with an open panel
+let activeIds = null;      // Set of highlighted ids (null = all glow)
+const highlightLinks = new Set();
+
+/* ---------- star texture (soft halo) ---------- */
+function makeStarTexture(color) {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const g = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+  g.addColorStop(0.00, '#ffffff');
+  g.addColorStop(0.12, color);
+  g.addColorStop(0.38, color + '55');
+  g.addColorStop(1.00, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  return new THREE.CanvasTexture(canvas);
+}
+const textures = {};
+Object.entries(COLORS).forEach(([type, c]) => textures[type] = makeStarTexture(c));
+
+/* ---------- graph ---------- */
+const Graph = ForceGraph3D()(document.getElementById('graph'))
+  .graphData(DATA)
+  .backgroundColor('#060b0e')
+  .showNavInfo(false)
+  .nodeLabel(n => `<div style="font-family:Georgia,serif;font-size:13px;color:#d8e2dd;
+      background:rgba(6,11,14,0.85);padding:6px 12px;border-radius:6px;
+      border:1px solid rgba(140,180,170,0.2)">${escapeHtml(n.label)}</div>`)
+  .nodeThreeObject(node => {
+    const material = new THREE.SpriteMaterial({
+      map: textures[node.type] || textures.note,
+      transparent: true,
+      opacity: 0.95,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+    const sprite = new THREE.Sprite(material);
+    const s = 7 + Math.sqrt(node.val || 1) * 3.5;
+    sprite.scale.set(s, s, 1);
+    node.__sprite = sprite;
+    node.__scale = s;
+    return sprite;
+  })
+  .linkColor(l => highlightLinks.has(l) ? '#7fe0d0' : '#3a5a55')
+  .linkOpacity(0.35)
+  .linkWidth(l => highlightLinks.has(l) ? 1.2 : 0.3)
+  .onNodeClick(flyToNode)
+  .onNodeHover(n => document.body.style.cursor = n ? 'pointer' : 'default')
+  .onBackgroundClick(clearFocus);
+
+Graph.d3Force('charge').strength(-95);
+
+/* ---------- Phase 15H: bloom — stars actually glow now ---------- */
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.9,   // strength
+  0.4,   // radius
+  0.12   // threshold — only bright sprite cores bloom, not the dim starfield dust
+);
+Graph.postProcessingComposer().addPass(bloomPass);
+
+/* ---------- background sky: star dust ---------- */
+function addStarfield() {
+  const scene = Graph.scene();
+  [[1400, 2600, 0.9, 0x5f7a72, 0.5], [900, 1800, 1.6, 0x9fb8b0, 0.35]]
+    .forEach(([count, radius, size, color, opacity]) => {
+      const geo = new THREE.BufferGeometry();
+      const pos = new Float32Array(count * 3);
+      for (let i = 0; i < count; i++) {
+        const r = radius * (0.6 + 0.4 * Math.random());
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos(2 * Math.random() - 1);
+        pos[i*3]   = r * Math.sin(phi) * Math.cos(theta);
+        pos[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
+        pos[i*3+2] = r * Math.cos(phi);
+      }
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      const mat = new THREE.PointsMaterial({
+        size, color, transparent: true, opacity,
+        sizeAttenuation: false, depthWrite: false
+      });
+      scene.add(new THREE.Points(geo, mat));
+    });
+}
+addStarfield();
+
+/* ---------- slow drift, like the sky turning ---------- */
+const controls = Graph.controls();
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.22;
+
+/* ---------- highlighting ---------- */
+function applyHighlight() {
+  DATA.nodes.forEach(n => {
+    if (!n.__sprite) return;
+    const inFilter = !currentTypeFilter || n.type === currentTypeFilter;
+    const active = !activeIds || activeIds.has(n.id);
+    n.__sprite.material.opacity = !inFilter ? 0.10 : (active ? 1.0 : 0.24);
+    const filterScale = currentTypeFilter && inFilter ? 1.35 : 1;
+    const focusScale = focusNode && n.id === focusNode.id ? 1.5 : 1;
+    const s = n.__scale * filterScale * focusScale;
+    n.__sprite.scale.set(s, s, 1);
+  });
+  Graph.linkOpacity(l => {
+    if (!currentTypeFilter) return 0.35;
+    const [s, t] = linkEndpoints(l);
+    const touchesFilter = DATA.nodes[s]?.type === currentTypeFilter ||
+      DATA.nodes[t]?.type === currentTypeFilter;
+    return touchesFilter ? 0.42 : 0.06;
+  });
+  Graph.linkColor(l => highlightLinks.has(l) ? '#7fe0d0' : '#3a5a55');
+  Graph.linkWidth(l => highlightLinks.has(l) ? 1.2 : 0.3);
+}
+
+/* ---------- camera flight + panel ---------- */
+const panel = document.getElementById('panel');
+
+function flyToNode(node) {
+  focusNode = node;
+  activeIds = new Set([node.id, ...(neighbors.get(node.id) || [])]);
+  highlightLinks.clear();
+  DATA.links.forEach(l => {
+    const [s, t] = linkEndpoints(l);
+    if (s === node.id || t === node.id) highlightLinks.add(l);
+  });
+
+  const dist = 110;
+  const len = Math.hypot(node.x, node.y, node.z);
+  controls.autoRotate = false;
+  // if the node is at the origin, a fixed offset keeps the camera
+  // from landing right on top of it
+  const camPos = len > 1
+    ? { x: node.x * (1 + dist / len), y: node.y * (1 + dist / len), z: node.z * (1 + dist / len) }
+    : { x: node.x + dist * 0.7, y: node.y + dist * 0.4, z: node.z + dist * 0.7 };
+  Graph.cameraPosition(camPos, node, 1800);
+
+  applyHighlight();
+  openPanel(node);
+}
+
+/* Phase 4: answer backed by 4+ nodes -> light up the whole constellation */
+function highlightCluster(ids) {
+  focusNode = null;
+  panel.classList.remove('open');
+  activeIds = new Set(ids);
+  highlightLinks.clear();
+  DATA.links.forEach(l => {
+    const [s, t] = linkEndpoints(l);
+    if (activeIds.has(s) && activeIds.has(t)) highlightLinks.add(l);
+  });
+  controls.autoRotate = false;
+  Graph.zoomToFit(1600, 120, n => activeIds.has(n.id));
+  applyHighlight();
+}
+
+/* Phase 4: the galaxy shows where the answer comes from */
+function answerFly(nodeIds) {
+  if (!nodeIds || !nodeIds.length) return;   // small talk: camera stays put
+  if (nodeIds.length >= 4) highlightCluster(nodeIds);
+  else flyToNode(DATA.nodes[nodeIds[0]]);
+}
+
+/* ---------- Phase 10: tab switching ---------- */
+function switchPanelTab(tab) {
+  const nodeTab = document.getElementById('tab-node');
+  const logTab  = document.getElementById('tab-log');
+  nodeTab.style.display = tab === 'node' ? '' : 'none';
+  logTab.style.display  = tab === 'log'  ? '' : 'none';
+  document.getElementById('ptab-node').classList.toggle('active', tab === 'node');
+  document.getElementById('ptab-log').classList.toggle('active', tab === 'log');
+  if (tab === 'log') _scrollLogToBottom();
+}
+
+const EDITABLE_TYPES = new Set(['note', 'idea', 'project']);
+let _editingPath = null;
+
+function _exitEditMode() {
+  document.getElementById('panel-editor').style.display = 'none';
+  document.getElementById('panel-edit-actions').style.display = 'none';
+  document.getElementById('panel-excerpt').style.display = '';
+  document.getElementById('panel-neighbors').style.display = '';
+  document.getElementById('doc-view').style.display = 'none';
+  const editRow = document.getElementById('panel-edit-row');
+  if (editRow._visible) editRow.style.display = '';
+  const docRow = document.getElementById('doc-view-row');
+  if (docRow._visible) docRow.style.display = '';
+  _editingPath = null;
+}
+
+function openPanel(node) {
+  _exitEditMode();
+  switchPanelTab('node');
+  const color = COLORS[node.type] || '#d8e2dd';
+  const typeEl = document.getElementById('panel-type');
+  typeEl.textContent = TYPE_NAME[node.type] || node.type;
+  typeEl.style.color = color;
+  document.getElementById('panel-label').textContent = node.label;
+  document.getElementById('panel-path').textContent =
+    node.path + (node.status ? `  ·  status: ${node.status}` : '');
+  document.getElementById('panel-excerpt').textContent = node.excerpt || '';
+
+  const neighborItems = [...(neighbors.get(node.id) || [])]
+    .map(id => DATA.nodes[id])
+    .map(v => `<span style="color:${COLORS[v.type]}">●</span> ${escapeHtml(v.label)}`);
+  document.getElementById('panel-neighbors').innerHTML = neighborItems.length
+    ? `<b>Nearby constellation</b><br>${neighborItems.join('<br>')}`
+    : '';
+
+  const canEdit = EDITABLE_TYPES.has(node.type) && node.path && !node.path.includes('#');
+  const editRow = document.getElementById('panel-edit-row');
+  editRow.style.display = canEdit ? '' : 'none';
+  editRow._visible = canEdit;
+  const docRow = document.getElementById('doc-view-row');
+  docRow.style.display = canEdit ? '' : 'none';
+  docRow._visible = canEdit;
+  if (canEdit) _editingPath = node.path;
+
+  panel.classList.add('open');
+}
+
+async function _enterEditMode() {
+  if (!_editingPath) return;
+  const btn = document.getElementById('edit-note');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/note?path=' + encodeURIComponent(_editingPath));
+    const data = await res.json();
+    if (data.error) { alert('Could not load note: ' + data.error); return; }
+    document.getElementById('panel-editor').value = data.content;
+    document.getElementById('panel-editor').style.display = 'block';
+    document.getElementById('panel-edit-actions').style.display = 'flex';
+    document.getElementById('panel-excerpt').style.display = 'none';
+    document.getElementById('panel-neighbors').style.display = 'none';
+    document.getElementById('panel-edit-row').style.display = 'none';
+  } catch (e) {
+    alert('Could not load note: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function _saveEdit() {
+  if (!_editingPath) return;
+  const saveBtn = document.getElementById('save-edit');
+  saveBtn.disabled = true;
+  const content = document.getElementById('panel-editor').value;
+  try {
+    const res = await fetch('/edit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: _editingPath, content })
+    });
+    const data = await res.json();
+    if (data.error) { alert('Save failed: ' + data.error); return; }
+    // update the live galaxy with the new graph
+    if (data.graph) {
+      const positions = new Map();
+      DATA.nodes.forEach(n => positions.set(n.path, n));
+      data.graph.nodes.forEach(n => {
+        const old = positions.get(n.path);
+        if (old && old.x !== undefined) {
+          n.x = old.x; n.y = old.y; n.z = old.z;
+          n.vx = 0; n.vy = 0; n.vz = 0;
+        }
+      });
+      DATA = data.graph;
+      Graph.graphData(DATA);
+    }
+    // update the excerpt in view mode with the newly built node data
+    if (data.node_id != null && DATA.nodes[data.node_id]) {
+      document.getElementById('panel-excerpt').textContent =
+        DATA.nodes[data.node_id].excerpt || '';
+    }
+    _exitEditMode();
+  } catch (e) {
+    alert('Save failed: ' + e.message);
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+document.getElementById('edit-note').addEventListener('click', _enterEditMode);
+document.getElementById('save-edit').addEventListener('click', _saveEdit);
+document.getElementById('cancel-edit').addEventListener('click', _exitEditMode);
+
+/* ---------- Phase 15I: Legend-based type filtering ---------- */
+const originalNodeScales = new Map();
+
+function legacyToggleTypeFilter(type, color) {
+  if (currentTypeFilter === type) {
+    // Already filtered — deselect and zoom out
+    currentTypeFilter = null;
+    document.querySelector(`[data-type="${type}"]`).classList.remove('active');
+
+    // Restore original node sizes and colors
+    DATA.nodes.forEach((node, i) => {
+      if (node.__sprite) {
+        const origScale = originalNodeScales.get(i) || (7 + Math.sqrt(node.val || 1) * 3.5);
+        node.__sprite.scale.set(origScale, origScale, 1);
+        node.__scale = origScale;
+        if (node.__sprite.material) {
+          node.__sprite.material.color.setHex(0xffffff);
+          node.__sprite.material.opacity = 0.95;
+        }
+      }
+    });
+    Graph.zoomToFit(1600, 90);
+  } else {
+    // New filter — deselect previous and apply new one
+    if (currentTypeFilter) {
+      document.querySelector(`[data-type="${currentTypeFilter}"]`).classList.remove('active');
+    }
+    currentTypeFilter = type;
+    document.querySelector(`[data-type="${type}"]`).classList.add('active');
+
+    // Highlight nodes of this type: bigger, brighter, more saturated color
+    const filteredIds = DATA.nodes
+      .map((n, i) => n.type === type ? i : null)
+      .filter(i => i !== null);
+
+    DATA.nodes.forEach((node, i) => {
+      if (node.__sprite) {
+        if (filteredIds.includes(i)) {
+          // Save original scale
+          if (!originalNodeScales.has(i)) {
+            originalNodeScales.set(i, node.__scale || (7 + Math.sqrt(node.val || 1) * 3.5));
+          }
+          // Make bigger + brighter + darker/more saturated color
+          const newScale = (originalNodeScales.get(i) || node.__scale) * 1.6;
+          node.__sprite.scale.set(newScale, newScale, 1);
+          node.__scale = newScale;
+          if (node.__sprite.material) {
+            // Darken the color (more saturated)
+            node.__sprite.material.color.setHex(parseInt(color.substring(1), 16));
+            node.__sprite.material.opacity = 1.0;
+          }
+        } else {
+          // Dim non-filtered nodes
+          const origScale = originalNodeScales.get(i) || (7 + Math.sqrt(node.val || 1) * 3.5);
+          node.__sprite.scale.set(origScale * 0.6, origScale * 0.6, 1);
+          node.__scale = origScale * 0.6;
+          if (node.__sprite.material) {
+            node.__sprite.material.opacity = 0.3;
+          }
+        }
+      }
+    });
+
+    // Small zoom towards the filtered nodes
+    if (filteredIds.length > 0) {
+      const bounds = { x: [Infinity, -Infinity], y: [Infinity, -Infinity], z: [Infinity, -Infinity] };
+      filteredIds.forEach(i => {
+        const n = DATA.nodes[i];
+        bounds.x[0] = Math.min(bounds.x[0], n.x);
+        bounds.x[1] = Math.max(bounds.x[1], n.x);
+        bounds.y[0] = Math.min(bounds.y[0], n.y);
+        bounds.y[1] = Math.max(bounds.y[1], n.y);
+        bounds.z[0] = Math.min(bounds.z[0], n.z);
+        bounds.z[1] = Math.max(bounds.z[1], n.z);
+      });
+      const midpoint = {
+        x: (bounds.x[0] + bounds.x[1]) / 2,
+        y: (bounds.y[0] + bounds.y[1]) / 2,
+        z: (bounds.z[0] + bounds.z[1]) / 2
+      };
+      let distance = Math.max(
+        bounds.x[1] - bounds.x[0],
+        bounds.y[1] - bounds.y[0],
+        bounds.z[1] - bounds.z[0]
+      ) * 1.2;
+      // Don't zoom in too much for small clusters (1-3 nodes)
+      distance = Math.max(distance, 150);
+      Graph.cameraPosition(
+        { x: midpoint.x, y: midpoint.y, z: midpoint.z + distance },
+        midpoint,
+        1200
+      );
+    }
+  }
+  applyHighlight();
+}
+
+// Single source of truth for legend filters. The older implementation above
+// is kept only as historical context; this declaration is the active one.
+function toggleTypeFilter(type) {
+  currentTypeFilter = currentTypeFilter === type ? null : type;
+  refreshLegend();
+  applyHighlight();
+  controls.autoRotate = !currentTypeFilter;
+  if (currentTypeFilter) {
+    Graph.zoomToFit(900, 700, node => node.type === currentTypeFilter);
+  } else {
+    Graph.zoomToFit(1200, 700);
+  }
+}
+
+function clearFocus() {
+  focusNode = null;
+  activeIds = null;
+  highlightLinks.clear();
+  panel.classList.remove('open');
+  applyHighlight();
+  controls.autoRotate = true;
+}
+
+document.getElementById('close').addEventListener('click', clearFocus);
+window.addEventListener('resize', () => {
+  Graph.width(window.innerWidth).height(window.innerHeight);
+  bloomPass.setSize(window.innerWidth, window.innerHeight);
+});
+
+/* ---------- Actions panel: user-facing shortcuts ---------- */
+const powersToggle = document.getElementById('powers-toggle');
+const powersPanel = document.getElementById('powers-panel');
+const powersList = document.getElementById('powers-list');
+const runtimeStateEl = document.getElementById('runtime-state');
+const runtimeToggle = document.getElementById('runtime-toggle');
+const devConsole = document.getElementById('dev-console');
+const devOperation = document.getElementById('dev-operation');
+const devPayload = document.getElementById('dev-payload');
+const devExecute = document.getElementById('dev-execute');
+const devResult = document.getElementById('dev-result');
+let powersLoaded = false;
+let runtimeMode = 'production';
+
+const DEV_PAYLOADS = {
+  'notes.list': { query: '' },
+  'notes.read': { path: 'docs/captures/example.md' },
+  'notes.create': { text: 'Nueva nota creada desde el modo Dev.' },
+  'notes.update': { path: 'docs/captures/example.md', content: '# Nota\n\nContenido actualizado.\n' },
+  'notes.delete': { path: 'docs/captures/example.md' },
+  'connectors.list': {},
+  'connectors.create': { id: 'example-connector', label: 'Example Connector', status: 'placeholder', description: 'Created from Dev mode.' },
+  'connectors.update': { id: 'example-connector', label: 'Example Connector', status: 'active', description: 'Updated from Dev mode.' },
+  'connectors.delete': { id: 'example-connector' },
+  'tools.list': {},
+  'tools.create': { id: 'example-capability', label: 'Example Capability', status: 'placeholder', description: 'Created from Dev mode.' },
+  'tools.update': { id: 'example-capability', label: 'Example Capability', status: 'active', description: 'Updated from Dev mode.' },
+  'tools.delete': { id: 'example-capability' },
+  'graph.rebuild': {}
+};
+
+function setDevPayload() {
+  devPayload.value = JSON.stringify(DEV_PAYLOADS[devOperation.value] || {}, null, 2);
+}
+
+function renderRuntime(info) {
+  runtimeMode = info.mode === 'dev' ? 'dev' : 'production';
+  const isDev = runtimeMode === 'dev';
+  runtimeStateEl.textContent = isDev
+    ? 'Dev · local files only · external AI disabled'
+    : 'Production · external AI enabled';
+  runtimeStateEl.classList.toggle('dev', isDev);
+  runtimeToggle.textContent = isDev ? 'Back to Production' : 'Enable Dev';
+  runtimeToggle.classList.toggle('dev', isDev);
+  devConsole.hidden = !isDev;
+}
+
+function refreshDevActionState() {
+  const blocked = runtimeMode === 'dev';
+  powersList.querySelectorAll('[data-action-id="ask-galaxy"], [data-action-id="web-search"]')
+    .forEach(item => item.classList.toggle('disabled', blocked));
+}
+
+async function loadRuntime() {
+  try {
+    const res = await fetch('/runtime');
+    renderRuntime(await res.json());
+  } catch (e) {
+    runtimeStateEl.textContent = 'Runtime unavailable';
+    runtimeToggle.disabled = true;
+  }
+}
+
+async function toggleRuntime() {
+  const next = runtimeMode === 'dev' ? 'production' : 'dev';
+  if (next === 'production' || confirm('Enable Dev mode? Claude/Anthropic and web search will be blocked. Local file operations remain real.')) {
+    runtimeToggle.disabled = true;
+    try {
+      const res = await fetch('/runtime', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ mode: next })
+      });
+      const info = await res.json();
+      if (!res.ok || info.error) throw new Error(info.error || 'Runtime change failed');
+      renderRuntime(info);
+      devResult.textContent = next === 'dev' ? 'Dev mode enabled.' : 'Production mode restored.';
+    } catch (e) {
+      devResult.textContent = 'Runtime error: ' + e.message;
+    } finally {
+      runtimeToggle.disabled = false;
+    }
+  }
+}
+
+function showDevResult(data) {
+  const result = data.result || data;
+  const view = {...data};
+  if (view.result && view.result.graph) {
+    view.result = {...view.result, graph: {
+      nodes: view.result.graph.nodes?.length || 0,
+      links: view.result.graph.links?.length || 0,
+      mtime: view.result.graph.mtime
+    }};
+  }
+  devResult.textContent = JSON.stringify(view, null, 2);
+  if (result.graph) {
+    const positions = new Map(DATA.nodes.map(n => [n.path + '|' + n.label, n]));
+    result.graph.nodes.forEach(n => {
+      const old = positions.get(n.path + '|' + n.label);
+      if (old && old.x !== undefined) { n.x = old.x; n.y = old.y; n.z = old.z; }
+    });
+    DATA = result.graph;
+    neighbors = computeNeighbors(DATA);
+    Graph.graphData(DATA);
+    refreshLegend();
+    setTimeout(applyHighlight, 250);
+  }
+}
+
+async function executeDevOperation() {
+  if (runtimeMode !== 'dev') return;
+  const operation = devOperation.value;
+  if (operation.endsWith('.delete') && !confirm(`Execute ${operation}? This changes real project files.`)) return;
+  let payload;
+  try { payload = JSON.parse(devPayload.value || '{}'); }
+  catch (e) { devResult.textContent = 'Invalid JSON: ' + e.message; return; }
+  devExecute.disabled = true;
+  devResult.textContent = 'Executing locally…';
+  try {
+    const res = await fetch('/dev/execute', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ operation, payload })
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || 'Dev operation failed');
+    showDevResult(data);
+  } catch (e) {
+    devResult.textContent = 'Dev operation failed: ' + e.message;
+  } finally {
+    devExecute.disabled = false;
+  }
+}
+
+devOperation.addEventListener('change', setDevPayload);
+runtimeToggle.addEventListener('click', toggleRuntime);
+devExecute.addEventListener('click', executeDevOperation);
+setDevPayload();
+
+function insertCommand(cmd) {
+  questionInput.value = cmd;
+  autoGrowQuestion();
+  questionInput.focus();
+  setPowersOpen(false);
+}
+
+function focusChat() {
+  setPowersOpen(false);
+  questionInput.focus();
+}
+
+function renderPower(name, description, active, clickable, actionId) {
+  return `<div class="power-item${clickable ? ' clickable' : ''}" data-action-id="${escapeHtml(actionId || '')}" data-cmd-name="${escapeHtml(name)}">
+    <span class="power-dot ${active ? 'on' : 'off'}"></span>
+    <div>
+      <div class="power-name">${escapeHtml(name)}${
+        active ? '' : '<span class="power-soon">coming soon</span>'
+      }</div>
+      <div class="power-desc">${escapeHtml(description || '')}</div>
+    </div>
+  </div>`;
+}
+
+async function loadPowers() {
+  if (powersLoaded) return;
+  try {
+    const info = await (await fetch('/powers')).json();
+    // Older server processes may still expose Phase 7's `active` payload
+    // until they are restarted. Keep the menu usable during that transition.
+    const legacyCommands = {
+      'Ask about your galaxy': null,
+      'Remember something new': '/remember ',
+      'Choose the AI model': null,
+      'Fly between stars': null
+    };
+    const actions = (info.actions && info.actions.length)
+      ? info.actions
+      : (info.active || []).filter(action => action.name !== 'Speak and listen by voice').map(action => ({
+          ...action,
+          command: legacyCommands[action.name] ?? null,
+          section: 'Shortcuts',
+          available: true
+        }));
+    let lastSection = '';
+    const html = actions.map(action => {
+      const section = action.section || 'Actions';
+      const heading = section === lastSection ? '' : `<div class="power-section">${escapeHtml(section)}</div>`;
+      lastSection = section;
+      return heading + renderPower(action.name, action.description, action.available !== false, true, action.id);
+    }).join('');
+    powersList.innerHTML = html;
+    refreshDevActionState();
+
+    // The menu is an operation catalog, not a dump of implementation names.
+    const items = [...powersList.querySelectorAll('.power-item')];
+    actions.forEach((action, i) => {
+      if (!items[i]) return;
+      items[i].addEventListener('click', () => action.command ? insertCommand(action.command) : focusChat());
+    });
+
+    powersLoaded = true;
+  } catch (e) {
+    powersList.innerHTML = `<div class="power-desc">Couldn't load: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function setPowersOpen(open) {
+  powersPanel.classList.toggle('open', open);
+  // the panel itself (z-index 25) covers the button (z-index 10, in #header)
+  // while it's open — hiding it avoids a "ghost" button that looks like
+  // it closes the panel but never actually receives the click.
+  powersToggle.classList.toggle('hidden-while-open', open);
+  if (open) { loadPowers(); loadRuntime(); }
+}
+powersToggle.addEventListener('click', () =>
+  setPowersOpen(!powersPanel.classList.contains('open')));
+document.getElementById('powers-close').addEventListener('click', () => setPowersOpen(false));
+
+// a single Escape handler, aware of what's open: if the powers panel is
+// open, close ONLY that — previously two independent listeners made
+// Escape close the powers panel AND undo the selected node's
+// focus/camera at the same time.
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (powersPanel.classList.contains('open')) setPowersOpen(false);
+  else clearFocus();
+});
+
+/* ---------- Phase 10: Navigator's Log ---------- */
+const LOG_KEY = 'moai-log';
+
+function _loadLog() {
+  try { return JSON.parse(localStorage.getItem(LOG_KEY) || '[]'); }
+  catch { return []; }
+}
+function _saveLog(entries) {
+  try { localStorage.setItem(LOG_KEY, JSON.stringify(entries.slice(-300))); }
+  catch {}
+}
+function _scrollLogToBottom() {
+  const scroll = document.querySelector('#tab-log .panel-scroll');
+  if (scroll) setTimeout(() => { scroll.scrollTop = scroll.scrollHeight; }, 0);
+}
+
+function _renderLogEntry(entry) {
+  const wrap = document.getElementById('log-entries');
+  const el = document.createElement('div');
+  el.className = 'log-entry';
+  const d = new Date(entry.ts);
+  const hh = String(d.getHours()).padStart(2,'0');
+  const mm = String(d.getMinutes()).padStart(2,'0');
+  const timeStr = `${hh}:${mm}`;
+
+  let starsHtml = '';
+  if (entry.nodes && entry.nodes.length) {
+    starsHtml = '<div class="log-stars">' +
+      entry.nodes.map(n =>
+        `<span class="log-star" data-nid="${n.id}">● ${escapeHtml(n.label)}</span>`
+      ).join('  ') + '</div>';
+  }
+  let srcHtml = '';
+  if (entry.sources && entry.sources.length) {
+    const safe = entry.sources.filter(s => /^https?:\/\//i.test(s.url || '')).slice(0, 3);
+    if (safe.length) srcHtml = '<div class="log-sources">' +
+      safe.map(s =>
+        `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">🌐 ${escapeHtml(s.title)}</a>`
+      ).join('') + '</div>';
+  }
+  el.innerHTML = `
+    <div class="log-ts">${timeStr} · ${escapeHtml(entry.type || 'chat')}</div>
+    <div class="log-q">${escapeHtml(entry.question || '')}</div>
+    <div class="log-a">${escapeHtml(entry.answer || '')}</div>
+    ${starsHtml}${srcHtml}`;
+
+  el.querySelectorAll('.log-star').forEach(s => {
+    s.addEventListener('click', () => {
+      const id = parseInt(s.dataset.nid, 10);
+      if (DATA.nodes[id]) { switchPanelTab('node'); flyToNode(DATA.nodes[id]); }
+    });
+  });
+  wrap.appendChild(el);
+}
+
+function _renderAllLog() {
+  const wrap = document.getElementById('log-entries');
+  const empty = document.getElementById('log-empty');
+  wrap.innerHTML = '';
+  const entries = _loadLog();
+  entries.forEach(_renderLogEntry);
+  if (empty) empty.style.display = entries.length ? 'none' : '';
+  _scrollLogToBottom();
+}
+
+// Phase 15F: the log stays hidden until the first exchange — then it
+// opens itself once, on the right. After that, respect however
+// Matatoa left it (don't force it back open every single message).
+let logAutoOpened = false;
+function autoOpenLogOnce() {
+  if (logAutoOpened) return;
+  logAutoOpened = true;
+  if (!panel.classList.contains('open')) {
+    panel.classList.add('open');
+    switchPanelTab('log');
+    _renderAllLog();
+  }
+}
+
+function _appendLogEntry(entry) {
+  autoOpenLogOnce();
+  const entries = _loadLog();
+  entries.push(entry);
+  _saveLog(entries);
+  const empty = document.getElementById('log-empty');
+  if (empty) empty.style.display = 'none';
+  _renderLogEntry(entry);
+  _scrollLogToBottom();
+}
+
+// tab switching listeners
+document.getElementById('ptab-node').addEventListener('click', () => {
+  if (!panel.classList.contains('open')) panel.classList.add('open');
+  switchPanelTab('node');
+});
+document.getElementById('ptab-log').addEventListener('click', () => {
+  if (!panel.classList.contains('open')) panel.classList.add('open');
+  switchPanelTab('log');
+  _renderAllLog();
+});
+
+// log toggle button in header
+document.getElementById('log-toggle').addEventListener('click', () => {
+  const isOpen = panel.classList.contains('open');
+  const logVisible = document.getElementById('tab-log').style.display !== 'none';
+  if (!isOpen) {
+    panel.classList.add('open');
+    switchPanelTab('log');
+    _renderAllLog();
+  } else if (!logVisible) {
+    switchPanelTab('log');
+    _renderAllLog();
+  } else {
+    // already showing log — close panel
+    clearFocus();
+  }
+});
+
+document.getElementById('log-clear').addEventListener('click', () => {
+  if (!confirm("Clear the entire Navigator's Log?")) return;
+  localStorage.removeItem(LOG_KEY);
+  document.getElementById('log-entries').innerHTML = '';
+  const empty = document.getElementById('log-empty');
+  if (empty) empty.style.display = '';
+});
+
+/* ---------- Phase 10: document viewer ---------- */
+let _markedLib = null;
+let _mermaidLib = null;
+
+async function _ensureLibs() {
+  if (!_markedLib) {
+    const m = await import('https://esm.sh/marked@14');
+    _markedLib = m.marked;
+  }
+  if (!_mermaidLib) {
+    const m = await import('https://esm.sh/mermaid@11');
+    _mermaidLib = m.default;
+    _mermaidLib.initialize({ startOnLoad: false, theme: 'dark', darkMode: true });
+  }
+}
+
+async function openDocView(path) {
+  if (!path) return;
+  const btn = document.getElementById('view-full-doc');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/note?path=' + encodeURIComponent(path));
+    const data = await res.json();
+    if (data.error) { alert('Cannot load: ' + data.error); return; }
+
+    await _ensureLibs();
+
+    // mark mermaid blocks before passing to marked (marked will escape HTML inside code fences)
+    const mermaidBlocks = [];
+    const mdSafe = data.content.replace(/```mermaid\n([\s\S]*?)```/g, (_, code) => {
+      const idx = mermaidBlocks.push(code.trim()) - 1;
+      return `<MERMAID_BLOCK_${idx}>`;
+    });
+
+    let html = _markedLib(mdSafe);
+
+    // replace markers with actual mermaid wrap elements
+    html = html.replace(/<p><MERMAID_BLOCK_(\d+)><\/p>|<MERMAID_BLOCK_(\d+)>/g, (_, a, b) => {
+      const idx = parseInt(a ?? b, 10);
+      const code = escapeHtml(mermaidBlocks[idx] || '');
+      return `<div class="mermaid-wrap"><pre class="mermaid" data-idx="${idx}"></pre><button class="mermaid-dl" data-idx="${idx}">↓ SVG</button></div>`;
+    });
+
+    const docContent = document.getElementById('doc-content');
+    docContent.innerHTML = html;
+
+    // inject mermaid source text (innerHTML-escaped above; set via textContent to avoid double-escape)
+    docContent.querySelectorAll('.mermaid[data-idx]').forEach(el => {
+      const idx = parseInt(el.dataset.idx, 10);
+      el.textContent = mermaidBlocks[idx] || '';
+    });
+
+    // render mermaid diagrams
+    const mermaidEls = [...docContent.querySelectorAll('.mermaid')];
+    if (mermaidEls.length) {
+      await _mermaidLib.run({ nodes: mermaidEls });
+    }
+
+    // wire download buttons
+    docContent.querySelectorAll('.mermaid-dl').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.idx, 10);
+        const svg = docContent.querySelectorAll('.mermaid-wrap')[idx]?.querySelector('svg');
+        if (!svg) return;
+        const blob = new Blob([svg.outerHTML], { type: 'image/svg+xml' });
+        const a = Object.assign(document.createElement('a'), {
+          href: URL.createObjectURL(blob), download: 'diagram.svg'
+        });
+        a.click(); URL.revokeObjectURL(a.href);
+      });
+    });
+
+    // reveal doc view, hide excerpt/neighbors/actions
+    document.getElementById('doc-view').style.display = '';
+    document.getElementById('panel-excerpt').style.display = 'none';
+    document.getElementById('panel-neighbors').style.display = 'none';
+    document.getElementById('doc-view-row').style.display = 'none';
+    document.getElementById('panel-edit-row').style.display = 'none';
+  } catch (e) {
+    alert('Cannot load document: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('doc-back').addEventListener('click', _exitEditMode);
+document.getElementById('view-full-doc').addEventListener('click', () => {
+  if (_editingPath) openDocView(_editingPath);
+});
+
+/* ---------- Phase 3: the Stone Voice ---------- */
+const voiceBtn = document.getElementById('voice');
+let voiceOn = localStorage.getItem('moai-voz') !== 'off';
+let audioUnlocked = false;
+let pendingSpeech = null;
+let chosenVoice = null;
+let currentAudio = null;  // ElevenLabs playback in flight, if any
+
+function stopAllSpeech() {
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
+  if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+}
+
+function refreshVoiceBtn() {
+  voiceBtn.textContent = voiceOn ? '🔊' : '🔇';
+  voiceBtn.title = voiceOn ? 'mute Moai' : 'unmute Moai';
+}
+refreshVoiceBtn();
+voiceBtn.addEventListener('click', () => {
+  voiceOn = !voiceOn;
+  localStorage.setItem('moai-voz', voiceOn ? 'on' : 'off');
+  if (!voiceOn) stopAllSpeech();
+  refreshVoiceBtn();
+});
+
+// Phase 16: named-voice scoring only applies to Spanish, where the two
+// voices below were hand-picked as good defaults; English voice names
+// aren't standardized enough across OSes to hardcode a short list, so
+// English just prefers a generically "natural/online" voice.
+function scoreVoiceName(name) {
+  const n = name.toLowerCase();
+  if (PREFS.lang === 'en') {
+    return (n.includes('natural') || n.includes('online')) ? 3 : 1;
+  }
+  if (n.includes('alvaro') || n.includes('álvaro')) return 4;
+  if (n.includes('natural') || n.includes('online')) return 3;
+  if (n.includes('pablo')) return 2;
+  return 1;
+}
+
+function pickVoice() {
+  if (!('speechSynthesis' in window)) return;
+  const voices = speechSynthesis.getVoices();
+  const norm = v => v.lang.replace('_', '-').toLowerCase();
+  const prefix = PREFS.lang === 'en' ? 'en' : 'es';
+  const matching = voices.filter(v => norm(v).startsWith(prefix));
+  const sorted = matching.slice().sort((a, b) => scoreVoiceName(b.name) - scoreVoiceName(a.name));
+  chosenVoice = sorted[0] || null;
+
+  // Phase 11/16: (re)populate the voice picker — re-runs whenever the
+  // candidate list changes, including a language toggle switching the
+  // filtered language, not just on first load.
+  const picker = document.getElementById('voice-pick');
+  if (picker && matching.length) {
+    picker.innerHTML = '<option value="">Auto</option>' +
+      sorted.map(v =>
+        `<option value="${escapeHtml(v.name)}">${escapeHtml(v.name)}</option>`
+      ).join('');
+    const saved = localStorage.getItem('moai-voice-name');
+    if (saved && [...picker.options].some(o => o.value === saved)) {
+      picker.value = saved;
+      chosenVoice = voices.find(v => v.name === saved) || chosenVoice;
+    }
+    picker.style.display = '';
+  }
+}
+if ('speechSynthesis' in window) {
+  speechSynthesis.onvoiceschanged = pickVoice;
+  pickVoice();
+}
+
+// Resolves once the utterance ends (or immediately if speech isn't
+// available) — callers await it to know when it's safe to start
+// listening again in conversation mode (Phase 15D).
+function speakBrowser(text) {
+  return new Promise(resolve => {
+    if (!('speechSynthesis' in window)) { resolve(); return; }
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    if (chosenVoice) { u.voice = chosenVoice; u.lang = chosenVoice.lang; }
+    else u.lang = PREFS.lang === 'en' ? 'en-US' : 'es-ES';
+    u.rate = 1.0;
+    u.pitch = 0.85;
+    // Phase 9/15: face reacts to speech events
+    u.onstart = () => setFaceState('talking');
+    u.onend   = () => { if (_faceState === 'talking') setFaceState('idle'); resolve(); };
+    u.onerror = () => { if (_faceState === 'talking') setFaceState('idle'); resolve(); };
+    u.onboundary = e => {
+      if (e.name !== 'word') return;
+      pulseMouth();
+    };
+    speechSynthesis.speak(u);
+  });
+}
+
+function pulseMouth() {
+  const mouth = document.querySelector('#moai-svg .mouth');
+  if (!mouth) return;
+  mouth.classList.add('mouth-active');
+  setTimeout(() => mouth.classList.remove('mouth-active'), 160);
+}
+
+/* word-level mouth sync from ElevenLabs' per-character timestamps —
+   same visual cadence as the browser's onboundary('word') events above */
+function scheduleMouthSync(alignment) {
+  if (!alignment || !alignment.characters || !alignment.character_start_times_seconds) return;
+  const chars = alignment.characters;
+  const starts = alignment.character_start_times_seconds;
+  let wordStart = null;
+  for (let i = 0; i <= chars.length; i++) {
+    const isBoundary = i === chars.length || /\s/.test(chars[i]);
+    if (!isBoundary && wordStart === null) wordStart = starts[i];
+    else if (isBoundary && wordStart !== null) {
+      setTimeout(pulseMouth, wordStart * 1000);
+      wordStart = null;
+    }
+  }
+}
+
+// Phase 15C: after an ElevenLabs failure, stop retrying for a while —
+// misconfiguration (bad voice_id, exhausted quota) won't fix itself
+// mid-session, so don't add a failed round trip to every single answer.
+let elevenLabsDisabledUntil = 0;
+
+// Returns a promise that resolves when playback ends, or null if
+// ElevenLabs wasn't used (not configured, on cooldown, or the request
+// failed) — null tells the caller to fall back to the browser voice.
+async function speakElevenLabs(text) {
+  if (Date.now() < elevenLabsDisabledUntil) return null;
+  try {
+    const res = await fetch('/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    const data = await res.json();
+    if (!res.ok || data.error || !data.audio_base64) {
+      elevenLabsDisabledUntil = Date.now() + 5 * 60 * 1000;
+      return null;
+    }
+    const audio = new Audio('data:audio/mpeg;base64,' + data.audio_base64);
+    currentAudio = audio;
+    const done = new Promise(resolve => {
+      audio.onplay  = () => setFaceState('talking');
+      audio.onended = () => { if (currentAudio === audio) currentAudio = null; if (_faceState === 'talking') setFaceState('idle'); resolve(); };
+      audio.onerror = () => { if (currentAudio === audio) currentAudio = null; if (_faceState === 'talking') setFaceState('idle'); resolve(); };
+    });
+    scheduleMouthSync(data.alignment);
+    await audio.play();
+    return done;
+  } catch (e) {
+    elevenLabsDisabledUntil = Date.now() + 5 * 60 * 1000;
+    return null;
+  }
+}
+
+// Resolves once Moai has fully finished speaking (whichever voice was
+// used) — or immediately if there's nothing to say/hear. Conversation
+// mode (Phase 15D) awaits this before it starts listening again.
+async function speak(text) {
+  if (!voiceOn) return;
+  const clean = text.replace(/[*_#`>|]/g, '').trim();
+  if (!clean) return;
+  if (!audioUnlocked) { pendingSpeech = clean; return; }
+  const elDone = await speakElevenLabs(clean);
+  if (elDone) { await elDone; return; }
+  await speakBrowser(clean);
+}
+
+// Phase 11: manual voice picker change handler
+document.getElementById('voice-pick').addEventListener('change', function () {
+  const name = this.value;
+  localStorage.setItem('moai-voice-name', name || '');
+  if (!name) {
+    // re-run auto selection (reset picker so pickVoice can repopulate)
+    const opts = [...this.options];
+    opts.forEach(o => o.selected = o.value === '');
+    const voices = speechSynthesis.getVoices();
+    const norm = v => v.lang.replace('_', '-').toLowerCase();
+    const prefix = PREFS.lang === 'en' ? 'en' : 'es';
+    const matching = voices.filter(v => norm(v).startsWith(prefix));
+    chosenVoice = matching.slice().sort((a, b) => scoreVoiceName(b.name) - scoreVoiceName(a.name))[0] || null;
+  } else {
+    chosenVoice = speechSynthesis.getVoices().find(v => v.name === name) || chosenVoice;
+  }
+});
+
+// browsers block audio until the user's first gesture
+window.addEventListener('pointerdown', () => {
+  if (audioUnlocked) return;
+  audioUnlocked = true;
+  if (pendingSpeech) { const t = pendingSpeech; pendingSpeech = null; speak(t); }
+});
+
+/* ---------- Phase 9: Aringa Ora — face state machine ---------- */
+const moaiFace = document.getElementById('moai-face');
+let _faceState = 'idle';
+
+function setFaceState(state) {
+  if (!moaiFace) return;
+  moaiFace.className = 's-' + state;
+  _faceState = state;
+}
+setFaceState('idle');
+
+/* ---------- status line ---------- */
+const statusEl = document.getElementById('status');
+function setStatus(text) {
+  statusEl.textContent = text || '';
+  statusEl.style.display = text ? 'block' : 'none';
+  // Phase 9: drive face state from status transitions
+  if (text === 'thinking…' || text === 'carving a new star…') {
+    setFaceState('thinking');
+  } else if (!text && (_faceState === 'thinking' || _faceState === 'tools')) {
+    setFaceState('idle');
+  }
+}
+
+/* ---------- Phase 16: bilingual preferences (language + addressed name) ----------
+   Source of truth is preferences.json on the server (not localStorage, unlike
+   every other setting here) — /preferences GET on boot, POST on change.
+   (PREFS itself is declared up near `let DATA = GRAPH;` — see the comment
+   there for why.) */
+let langPromptShown = false;
+let splashGone = false;
+
+const langPick = document.getElementById('lang-pick');
+const langPromptEl = document.getElementById('lang-prompt');
+const prefsNameState = document.getElementById('prefs-name-state');
+
+function applyPrefsToVoiceAndRec() {
+  if (rec) rec.lang = PREFS.lang === 'en' ? 'en-US' : 'es-ES';
+  pickVoice();
+  langPick.value = PREFS.lang || 'es';
+  prefsNameState.textContent = PREFS.name || 'Matatoa';
+}
+
+function maybeShowLangPrompt() {
+  if (PREFS.lang || !splashGone || langPromptShown) return;
+  langPromptShown = true;
+  langPromptEl.hidden = false;
+}
+
+const prefsPromise = fetch('/preferences').then(r => r.json()).then(p => {
+  PREFS = p;
+  applyPrefsToVoiceAndRec();
+  maybeShowLangPrompt();
+  return PREFS;
+}).catch(() => PREFS);
+
+async function savePrefs(lang, name) {
+  try {
+    const res = await fetch('/preferences', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lang, name })
+    });
+    PREFS = await res.json();
+  } catch (e) {
+    PREFS = { lang, name };
+  }
+  applyPrefsToVoiceAndRec();
+}
+
+async function submitLangPrompt(lang) {
+  const nameInput = document.getElementById('lang-prompt-name');
+  const name = nameInput.value.trim() || nameInput.placeholder;
+  await savePrefs(lang, name);
+  langPromptEl.classList.add('hide');
+  setTimeout(() => { langPromptEl.hidden = true; }, 500);
+}
+document.getElementById('lang-prompt-es').addEventListener('click', () => submitLangPrompt('es'));
+document.getElementById('lang-prompt-en').addEventListener('click', () => submitLangPrompt('en'));
+
+langPick.addEventListener('change', () => savePrefs(langPick.value, PREFS.name || 'Matatoa'));
+
+/* Actions panel: edit the addressed name */
+const prefsNameForm = document.getElementById('prefs-name-form');
+const prefsNameInput = document.getElementById('prefs-name-input');
+document.getElementById('prefs-name-edit').addEventListener('click', () => {
+  prefsNameInput.value = PREFS.name || '';
+  prefsNameForm.hidden = !prefsNameForm.hidden;
+});
+document.getElementById('prefs-name-save').addEventListener('click', async () => {
+  const name = prefsNameInput.value.trim() || 'Matatoa';
+  await savePrefs(PREFS.lang || 'es', name);
+  prefsNameForm.hidden = true;
+});
+
+/* ---------- Phase 3/15D: microphone + hands-free conversation mode ---------- */
+const micBtn = document.getElementById('mic');
+const convBtn = document.getElementById('conv-mode');
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null;
+let listening = false;
+let conversationMode = false;
+
+function refreshConvBtn() {
+  convBtn.classList.toggle('active', conversationMode);
+  convBtn.title = conversationMode
+    ? 'conversation mode: ON — click to stop'
+    : 'conversation mode (hands-free)';
+}
+
+function startListening() {
+  if (!rec || listening || askButton.disabled) return;
+  try { rec.start(); } catch (e) { /* already started */ }
+}
+
+if (!SR) {
+  micBtn.style.display = 'none';
+  convBtn.style.display = 'none';
+} else {
+  rec = new SR();
+  rec.lang = 'es-ES';
+  rec.interimResults = false;
+  rec.maxAlternatives = 1;
+
+  conversationMode = localStorage.getItem('moai-conv-mode') === 'on';
+  refreshConvBtn();
+  convBtn.addEventListener('click', () => {
+    conversationMode = !conversationMode;
+    localStorage.setItem('moai-conv-mode', conversationMode ? 'on' : 'off');
+    refreshConvBtn();
+    if (conversationMode) { stopAllSpeech(); startListening(); }
+    else if (listening) rec.stop();
+  });
+
+  micBtn.addEventListener('click', () => {
+    if (listening) { rec.stop(); return; }
+    stopAllSpeech();
+    startListening();
+  });
+  rec.onstart = () => {
+    listening = true;
+    micBtn.classList.add('listening');
+    setStatus('listening…');
+    setFaceState('listening');  // Phase 9
+  };
+  rec.onresult = e => {
+    const transcript = e.results[0][0].transcript.trim();
+    if (transcript && !askButton.disabled) {
+      questionInput.value = transcript;
+      autoGrowQuestion();
+      askMoai();
+    }
+  };
+  rec.onerror = e => {
+    if (e.error === 'not-allowed') {
+      // can't function hands-free without the mic — stop trying
+      conversationMode = false;
+      localStorage.setItem('moai-conv-mode', 'off');
+      refreshConvBtn();
+    }
+    const msg = e.error === 'not-allowed'
+      ? 'microphone blocked — allow access in Chrome'
+      : "didn't catch that";
+    setStatus(msg);
+    // only clears ITS OWN message, not a more recent one
+    setTimeout(() => {
+      if (!listening && statusEl.textContent === msg) setStatus('');
+    }, 3000);
+  };
+  rec.onend = () => {
+    listening = false;
+    micBtn.classList.remove('listening');
+    if (statusEl.textContent === 'listening…') setStatus('');
+    if (_faceState === 'listening') setFaceState('idle');  // Phase 9
+    // Phase 15D: silence/no-speech ended the recognizer with no question
+    // asked — if a request IS in flight, askMoai/rememberFlow will restart
+    // listening themselves once Moai finishes speaking, so don't race them.
+    if (conversationMode && !askButton.disabled) {
+      setTimeout(startListening, 400);
+    }
+  };
+}
+
+/* ---------- the Mind: chat ---------- */
+const questionInput = document.getElementById('question');
+const askButton = document.getElementById('ask');
+const answerBox = document.getElementById('answer');
+
+const sessionId = sessionStorage.getItem('moai-session') ||
+  (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()));
+sessionStorage.setItem('moai-session', sessionId);
+
+/* model picker */
+const modelSelect = document.getElementById('model');
+fetch('/models').then(r => r.json()).then(info => {
+  (info.models || []).forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.label;
+    modelSelect.appendChild(opt);
+  });
+  const saved = localStorage.getItem('moai-model');
+  modelSelect.value =
+    [...modelSelect.options].some(o => o.value === saved) ? saved : info.default;
+}).catch(() => { modelSelect.style.display = 'none'; });
+modelSelect.addEventListener('change', () =>
+  localStorage.setItem('moai-model', modelSelect.value));
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s;
+  // textContent->innerHTML escapes & < > but NOT quotes — without this,
+  // a value inserted inside an attribute (href="...") could break out
+  // of it and inject arbitrary attributes/events.
+  return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/* strips leftover markdown and [n] citations the model might sneak in */
+function cleanAnswer(s) {
+  return s
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/\s*\[\d+\]/g, '')
+    .trim();
+}
+
+function showAnswer(html, isError) {
+  answerBox.innerHTML = html;
+  answerBox.classList.add('visible');
+  answerBox.classList.toggle('error', !!isError);
+}
+
+// Phase 15F: successful chat/remember answers live in the (now
+// auto-opened) log on the right — the floating box above the chatbar
+// is reserved for errors and quick inline hints now.
+function hideAnswerBox() {
+  answerBox.classList.remove('visible');
+}
+
+/* ---------- Phase 15E: slash commands from the Menu ---------- */
+
+// Deterministic list commands: answered directly from the new CRUD
+// endpoints (Fase A), no LLM round trip needed.
+async function runListCommand(url, key, formatEntry) {
+  askButton.disabled = true;
+  setStatus('thinking…');
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    const items = data[key] || [];
+    const html = items.length
+      ? '<ul class="cmd-list">' + items.map(it => `<li>${escapeHtml(formatEntry(it))}</li>`).join('') + '</ul>'
+      : '<em>Nothing there yet.</em>';
+    showAnswer(html, false);
+    _appendLogEntry({
+      ts: Date.now(), question: url, type: 'chat', nodes: [], sources: [],
+      answer: items.length ? items.map(formatEntry).join(' · ') : 'Nothing there yet.'
+    });
+  } catch (e) {
+    showAnswer("Couldn't reach the server: " + escapeHtml(e.message), true);
+  } finally {
+    askButton.disabled = false;
+    setStatus('');
+    questionInput.value = ''; autoGrowQuestion();
+    questionInput.select();
+  }
+}
+
+async function handleEditNote(arg) {
+  if (!arg) {
+    showAnswer('Tell me which note — e.g. /edit-note peluquero', true);
+    questionInput.value = ''; autoGrowQuestion();
+    return;
+  }
+  askButton.disabled = true;
+  setStatus('thinking…');
+  try {
+    const res = await fetch('/notes?q=' + encodeURIComponent(arg));
+    const data = await res.json();
+    const notes = data.notes || [];
+    if (!notes.length) {
+      showAnswer(`No note matches «${escapeHtml(arg)}».`, true);
+    } else if (notes.length > 1) {
+      showAnswer('Several notes match: ' +
+        notes.slice(0, 5).map(n => escapeHtml(n.label)).join(', ') + '. Be more specific.', false);
+    } else {
+      openPanel(notes[0]);
+      _enterEditMode();
+    }
+  } catch (e) {
+    showAnswer("Couldn't search for it: " + escapeHtml(e.message), true);
+  } finally {
+    askButton.disabled = false;
+    setStatus('');
+    questionInput.value = ''; autoGrowQuestion();
+    questionInput.select();
+  }
+}
+
+async function handleDeleteNote(arg) {
+  if (!arg) {
+    showAnswer('Tell me which note — e.g. /delete-note peluquero', true);
+    questionInput.value = ''; autoGrowQuestion();
+    return;
+  }
+  askButton.disabled = true;
+  setStatus('thinking…');
+  try {
+    const res = await fetch('/notes?q=' + encodeURIComponent(arg));
+    const data = await res.json();
+    const notes = (data.notes || []).filter(n => ['note', 'idea', 'project'].includes(n.type));
+    if (!notes.length) {
+      showAnswer(`No note matches «${escapeHtml(arg)}».`, true);
+    } else if (notes.length > 1) {
+      showAnswer('Several notes match: ' +
+        notes.slice(0, 5).map(n => escapeHtml(n.label)).join(', ') + '. Be more specific.', false);
+    } else {
+      const note = notes[0];
+      if (!confirm(`Delete «${note.label}»? This cannot be undone.`)) return;
+      const delRes = await fetch('/note?path=' + encodeURIComponent(note.path), { method: 'DELETE' });
+      const delData = await delRes.json();
+      if (delData.error) {
+        showAnswer('Delete failed: ' + escapeHtml(delData.error), true);
+      } else {
+        if (delData.graph) {
+          const positions = new Map();
+          DATA.nodes.forEach(n => positions.set(n.path + '|' + n.label, n));
+          delData.graph.nodes.forEach(n => {
+            const old = positions.get(n.path + '|' + n.label);
+            if (old && old.x !== undefined) {
+              n.x = old.x; n.y = old.y; n.z = old.z;
+              n.vx = 0; n.vy = 0; n.vz = 0;
+            }
+          });
+          DATA = delData.graph;
+          neighbors = computeNeighbors(DATA);
+          Graph.graphData(DATA);
+          refreshLegend();
+        }
+        panel.classList.remove('open');
+        hideAnswerBox();
+        _appendLogEntry({
+          ts: Date.now(), question: `/delete-note ${arg}`,
+          answer: `Deleted «${note.label}».`, type: 'chat', nodes: [], sources: []
+        });
+      }
+    }
+  } catch (e) {
+    showAnswer("Couldn't delete it: " + escapeHtml(e.message), true);
+  } finally {
+    askButton.disabled = false;
+    setStatus('');
+    questionInput.value = ''; autoGrowQuestion();
+    questionInput.select();
+  }
+}
+
+// Returns true if `question` was a slash command this function fully
+// handled (askMoai should stop). /web-search, /connector/<id>, and
+// /tool/<id> are NOT handled here — they fall through to /chat, where
+// the system prompt knows what those prefixes mean.
+async function handleSlashCommand(question) {
+  const m = question.match(/^\/(\S+)\s*(.*)$/s);
+  if (!m) return false;
+  const cmd = m[1].toLowerCase();
+  const arg = m[2].trim();
+
+  if (cmd === 'remember') {
+    if (!arg) { showAnswer('Write something after /remember.', true); questionInput.value = ''; autoGrowQuestion(); return true; }
+    rememberFlow(arg);
+    return true;
+  }
+  if (cmd === 'edit-note' || cmd === 'remember-edit') { await handleEditNote(arg); return true; }
+  if (cmd === 'delete-note') { await handleDeleteNote(arg); return true; }
+  if (cmd === 'list-notes') {
+    await runListCommand('/notes' + (arg ? '?q=' + encodeURIComponent(arg) : ''), 'notes',
+      n => `${n.label} (${n.type})`);
+    return true;
+  }
+  if (cmd === 'list-connectors') {
+    await runListCommand('/connectors', 'connectors', c => `${c.label} — ${c.status}`);
+    return true;
+  }
+  if (cmd === 'list-tools') {
+    await runListCommand('/tools', 'tools', t => `${t.label} — ${t.status}`);
+    return true;
+  }
+  return false;
+}
+
+async function askMoai() {
+  const question = questionInput.value.trim();
+  if (!question) return;
+  if (/^(recu[eé]rda(me)?(\s+que)?|remember(\s+that)?)\s+/i.test(question)) { rememberFlow(question); return; }
+  if (question.startsWith('/') && await handleSlashCommand(question)) return;
+
+  askButton.disabled = true;
+  setStatus('thinking…');
+  try {
+    const res = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question,
+        session_id: sessionId,
+        model: modelSelect.value || undefined
+      })
+    });
+    const data = await res.json();
+    if (data.error) {
+      showAnswer(escapeHtml(data.error), true);
+      setFaceState('error');
+      setTimeout(() => { if (_faceState === 'error') setFaceState('idle'); }, 2500);
+      if (conversationMode) setTimeout(startListening, 1200);
+    } else {
+      // the server may have rebuilt the galaxy on its own (another
+      // tab, a manual build.py run): if its mtime doesn't match ours,
+      // the ids could point to the WRONG star even if they fall within
+      // range — we don't trust any of them in that case.
+      const graphStale = typeof data.graph_mtime === 'number' &&
+        typeof DATA.mtime === 'number' && data.graph_mtime !== DATA.mtime;
+      const rawIds = graphStale ? [] : (data.nodes || []);
+      const validIds = rawIds.filter(i => DATA.nodes[i]);
+      const stale = graphStale || validIds.length !== (data.nodes || []).length;
+      // filter BEFORE checking .length: if the search only brought back
+      // odd-scheme sources, we shouldn't be left with an empty <div> and
+      // its separator
+      const safeSources = (data.sources || [])
+        .filter(s => /^https?:\/\//i.test(s.url || ''))
+        .slice(0, 5); // visual cap — a search can bring back many
+      const clean = cleanAnswer(data.answer);
+      // Phase 15F: the answer itself lives in the (now auto-opened) log,
+      // not floating — the floating box is reserved for the rare "your
+      // local galaxy is out of sync" warning, which needs to be seen now.
+      if (stale) showAnswer('Outdated galaxy — reload the page to stay in sync.', true);
+      else hideAnswerBox();
+      // Phase 9/15: "tools" state visible briefly before speech starts,
+      // whenever the model actually called any tool this turn
+      const logType = safeSources.length ? 'web' : validIds.length ? 'nodes' : 'chat';
+      if ((data.tools_used || []).length && _faceState === 'thinking') setFaceState('tools');
+      // Phase 3: the spoken answer, short. Not awaited — the rest of this
+      // function (galaxy fly, log entry) shouldn't wait on speech to
+      // finish. Phase 15D: once it DOES finish, restart the mic if the
+      // hands-free conversation mode is on.
+      speak(clean).then(() => { if (conversationMode) startListening(); });
+      answerFly(validIds);         // Phase 4: the galaxy shows it
+      window.MOAI.lastNodes = validIds;
+      // Phase 13: save_note tool — if the model saved a note, update the galaxy live
+      if (data.new_id != null && data.graph) liveAddNode(data);
+      // Phase 10: log the exchange
+      _appendLogEntry({
+        ts: Date.now(), question, answer: clean, type: logType,
+        nodes: validIds.map(i => ({ id: i, label: DATA.nodes[i]?.label || '' })),
+        sources: safeSources
+      });
+    }
+  } catch (e) {
+    showAnswer("Couldn't reach the server: " + escapeHtml(e.message), true);
+    setFaceState('error');
+    setTimeout(() => { if (_faceState === 'error') setFaceState('idle'); }, 2500);
+    if (conversationMode) setTimeout(startListening, 1200);
+  } finally {
+    askButton.disabled = false;
+    setStatus('');
+    questionInput.select();
+  }
+}
+
+askButton.addEventListener('click', askMoai);
+questionInput.addEventListener('keydown', e => {
+  // Phase 15F: it's a <textarea> now — Enter still asks, Shift+Enter
+  // inserts a real newline instead of submitting.
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    if (!askButton.disabled) askMoai();
+  }
+  e.stopPropagation();
+});
+function autoGrowQuestion() {
+  questionInput.style.height = 'auto';
+  questionInput.style.height = questionInput.scrollHeight + 'px';
+}
+questionInput.addEventListener('input', autoGrowQuestion);
+
+/* ---------- Phase 6: Eternal Memory ---------- */
+async function rememberFlow(text) {
+  askButton.disabled = true;
+  setStatus('carving a new star…');
+  try {
+    const res = await fetch('/remember', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    const data = await res.json();
+    if (data.error) {
+      showAnswer(escapeHtml(data.error), true);
+      setFaceState('error');
+      setTimeout(() => { if (_faceState === 'error') setFaceState('idle'); }, 2500);
+      if (conversationMode) setTimeout(startListening, 1200);
+      return;
+    }
+    liveAddNode(data);
+    const phrase = `Custodiado, Matatoa. Una nueva estrella brilla en el firmamento.`;
+    hideAnswerBox();  // Phase 15F: the confirmation shows in the log, not floating
+    speak(phrase).then(() => { if (conversationMode) startListening(); });
+    questionInput.value = ''; autoGrowQuestion();
+    // Phase 10: log the remember action
+    _appendLogEntry({
+      ts: Date.now(), question: text, answer: phrase, type: 'chat',
+      nodes: [], sources: []
+    });
+  } catch (e) {
+    showAnswer("Couldn't carve it into stone: " + escapeHtml(e.message), true);
+    setFaceState('error');
+    setTimeout(() => { if (_faceState === 'error') setFaceState('idle'); }, 2500);
+    if (conversationMode) setTimeout(startListening, 1200);
+  } finally {
+    askButton.disabled = false;
+    setStatus('');
+  }
+}
+
+function liveAddNode(data) {
+  // preserve current positions so the galaxy doesn't jump
+  const positions = new Map();
+  DATA.nodes.forEach(n => positions.set(n.path + '|' + n.label, n));
+  const g = data.graph;
+  g.nodes.forEach(n => {
+    const old = positions.get(n.path + '|' + n.label);
+    if (old && old.x !== undefined) {
+      n.x = old.x; n.y = old.y; n.z = old.z;
+      n.vx = 0; n.vy = 0; n.vz = 0;
+    }
+  });
+
+  // the star is born at the position of its most related node
+  const newNode = g.nodes[data.new_id];
+  const related = data.related_id != null ? g.nodes[data.related_id] : null;
+  if (related && related.x !== undefined) {
+    newNode.x = related.x + (Math.random() - 0.5) * 40;
+    newNode.y = related.y + (Math.random() - 0.5) * 40;
+    newNode.z = related.z + (Math.random() - 0.5) * 40;
+  }
+
+  DATA = g;
+  neighbors = computeNeighbors(DATA);
+  focusNode = null;
+  activeIds = null;
+  highlightLinks.clear();
+  Graph.graphData(DATA);
+  refreshLegend();
+
+  // birth pulse + camera flight (once the sprite exists)
+  setTimeout(() => {
+    const n = DATA.nodes[data.new_id];
+    flyToNode(n);
+    birthPulse(n);
+  }, 450);
+}
+
+function birthPulse(node) {
+  const start = performance.now();
+  (function anim() {
+    if (!node.__sprite) { requestAnimationFrame(anim); return; }
+    const t = (performance.now() - start) / 1400;
+    if (t >= 1) {
+      const s = node.__scale * (focusNode === node ? 1.5 : 1);
+      node.__sprite.scale.set(s, s, 1);
+      return;
+    }
+    const k = 1.5 + Math.sin(t * Math.PI * 4) * 0.9 * (1 - t);
+    const s = node.__scale * k;
+    node.__sprite.scale.set(s, s, 1);
+    requestAnimationFrame(anim);
+  })();
+}
+
+/* ---------- Phase 5/16: startup greeting ---------- */
+// "IORANA" is Rapa Nui brand identity, not an interface-language string —
+// it stays fixed in both languages; only the addressed name is a preference.
+prefsPromise.then(() => {
+  const greeting = `IORANA ${(PREFS.name || 'MATATOA').toUpperCase()}.`;
+  showAnswer(escapeHtml(greeting), false);
+  speak(greeting);   // stays queued until the first click (audio is blocked until then)
+  setTimeout(() => {
+    if (answerBox.textContent === greeting) answerBox.classList.remove('visible');
+  }, 14000);
+});
+
+/* ---------- hook for debugging and future phases ---------- */
+window.MOAI = {
+  Graph, flyToNode, clearFocus, highlightCluster, answerFly, speak,
+  escapeHtml, cleanAnswer, setFaceState, switchPanelTab, openDocView,
+  lastNodes: [],
+  get data() { return DATA; },
+  get faceState() { return _faceState; }
+};
+
+/* ---------- encuadre inicial: cuando la galaxia se asienta ---------- */
+let fitted = false;
+Graph.onEngineStop(() => {
+  if (!fitted) {
+    fitted = true;
+    Graph.zoomToFit(1600, 90);
+    splashAppReady = true;
+    maybeHideSplash();
+  }
+});
+
+/* ---------- Phase 15G: Isla de Pascua splash ---------- */
+// Every load starts on the island view, then crosses over into the
+// galaxy — but the ~5s *simulated* wait only happens the very first
+// time (localStorage flag). Later visits just wait for the graph's own
+// force layout to settle (usually faster), so returning doesn't feel slow.
+const splashEl = document.getElementById('splash');
+const isFirstVisit = !localStorage.getItem('moai-splash-seen');
+localStorage.setItem('moai-splash-seen', '1');
+let splashMinDelayDone = false;
+let splashAppReady = false;
+function maybeHideSplash() {
+  if (!splashMinDelayDone || !splashAppReady || !splashEl) return;
+  hideSplashNow();
+}
+function hideSplashNow() {
+  if (!splashEl) return;
+  splashEl.classList.add('hide');
+  setTimeout(() => {
+    splashEl.remove();
+    splashGone = true;
+    maybeShowLangPrompt();
+  }, 1200);
+}
+// Phase 15G: click the island to skip the loading screen and jump to the galaxy
+splashEl.addEventListener('click', e => {
+  if (e.button === 0) {  // left click only
+    hideSplashNow();
+  }
+}, { once: true });  // only once, then listener is removed
+setTimeout(() => { splashMinDelayDone = true; maybeHideSplash(); }, isFirstVisit ? 5000 : 300);
+// safety net: never let a stalled graph engine trap Matatoa on the island forever
+setTimeout(() => { splashAppReady = true; maybeHideSplash(); }, 9000);
+</script>
+</body>
+</html>

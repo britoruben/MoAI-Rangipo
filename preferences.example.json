@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy this file to preferences.json, or just answer the first-run prompt in the viewer — it writes this file for you. preferences.json is in .gitignore — never commit it.",
+  "lang": "es",
+  "name": "your name here"
+}

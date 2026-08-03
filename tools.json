@@ -1,0 +1,36 @@
+{
+  "tools": [
+    {
+      "id": "knowledge",
+      "label": "Notes & Knowledge",
+      "group": "tool",
+      "entity": "notes",
+      "status": "active",
+      "description": "Create, read, update, and delete notes, ideas, and projects in the galaxy."
+    },
+    {
+      "id": "connectors",
+      "label": "Connectors",
+      "group": "tool",
+      "entity": "connectors",
+      "status": "active",
+      "description": "Create, read, update, and delete Gmail, Calendar, Slack, and other integrations."
+    },
+    {
+      "id": "web-search",
+      "label": "Web Search",
+      "group": "tool",
+      "entity": "web",
+      "status": "active",
+      "description": "Search current information on the web when the local galaxy is not enough."
+    },
+    {
+      "id": "voice",
+      "label": "Voice",
+      "group": "tool",
+      "entity": "voice",
+      "status": "active",
+      "description": "Speak to MoAI through the microphone and hear spoken answers."
+    }
+  ]
+}

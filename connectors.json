@@ -1,0 +1,26 @@
+{
+  "_comment": "Example — replace me. Each entry appears as a 'connector' type node in the galaxy. status: 'placeholder' (not syncing for real yet) or 'active'.",
+  "connectors": [
+    {
+      "id": "gmail",
+      "label": "Gmail",
+      "group": "connector",
+      "status": "placeholder",
+      "description": "Personal email. Once active it will feed the morning briefing."
+    },
+    {
+      "id": "calendar",
+      "label": "Google Calendar",
+      "group": "connector",
+      "status": "placeholder",
+      "description": "Schedule."
+    },
+    {
+      "id": "slack",
+      "label": "Slack",
+      "group": "connector",
+      "status": "placeholder",
+      "description": "Team messaging."
+    }
+  ]
+}
