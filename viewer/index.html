@@ -955,6 +955,40 @@ function linkEndpoints(l) {
 }
 let neighbors = computeNeighbors(DATA);
 
+/* ---------- swapping in a rebuilt graph ---------- */
+
+/* Identity of a node across rebuilds: its file, or its label for the
+   path-less connector/tool nodes. */
+function nodeKey(n) {
+  return n.path || '#' + n.label;
+}
+
+/* Copy coordinates from the graph on screen onto the rebuilt one, so the
+   galaxy doesn't jump every time the server hands us new data. */
+function carryOverPositions(graph) {
+  const previous = new Map(DATA.nodes.map(n => [nodeKey(n), n]));
+  graph.nodes.forEach(n => {
+    const old = previous.get(nodeKey(n));
+    if (old && old.x !== undefined) {
+      n.x = old.x; n.y = old.y; n.z = old.z;
+      n.vx = 0; n.vy = 0; n.vz = 0;
+    }
+  });
+  return graph;
+}
+
+function applyGraph(graph) {
+  DATA = graph;
+  neighbors = computeNeighbors(DATA);
+  Graph.graphData(DATA);
+  refreshLegend();
+}
+
+/* The usual after-a-rebuild update: same view, new data. */
+function replaceGraph(graph) {
+  applyGraph(carryOverPositions(graph));
+}
+
 /* ---------- highlight state ---------- */
 let focusNode = null;      // node with an open panel
 let activeIds = null;      // Set of highlighted ids (null = all glow)
@@ -1213,19 +1247,7 @@ async function _saveEdit() {
     const data = await res.json();
     if (data.error) { alert('Save failed: ' + data.error); return; }
     // update the live galaxy with the new graph
-    if (data.graph) {
-      const positions = new Map();
-      DATA.nodes.forEach(n => positions.set(n.path, n));
-      data.graph.nodes.forEach(n => {
-        const old = positions.get(n.path);
-        if (old && old.x !== undefined) {
-          n.x = old.x; n.y = old.y; n.z = old.z;
-          n.vx = 0; n.vy = 0; n.vz = 0;
-        }
-      });
-      DATA = data.graph;
-      Graph.graphData(DATA);
-    }
+    if (data.graph) replaceGraph(data.graph);
     // update the excerpt in view mode with the newly built node data
     if (data.node_id != null && DATA.nodes[data.node_id]) {
       document.getElementById('panel-excerpt').textContent =
@@ -1465,15 +1487,7 @@ function showDevResult(data) {
   }
   devResult.textContent = JSON.stringify(view, null, 2);
   if (result.graph) {
-    const positions = new Map(DATA.nodes.map(n => [n.path + '|' + n.label, n]));
-    result.graph.nodes.forEach(n => {
-      const old = positions.get(n.path + '|' + n.label);
-      if (old && old.x !== undefined) { n.x = old.x; n.y = old.y; n.z = old.z; }
-    });
-    DATA = result.graph;
-    neighbors = computeNeighbors(DATA);
-    Graph.graphData(DATA);
-    refreshLegend();
+    replaceGraph(result.graph);
     setTimeout(applyHighlight, 250);
   }
 }
@@ -2330,21 +2344,7 @@ async function handleDeleteNote(arg) {
       if (delData.error) {
         showAnswer('Delete failed: ' + escapeHtml(delData.error), true);
       } else {
-        if (delData.graph) {
-          const positions = new Map();
-          DATA.nodes.forEach(n => positions.set(n.path + '|' + n.label, n));
-          delData.graph.nodes.forEach(n => {
-            const old = positions.get(n.path + '|' + n.label);
-            if (old && old.x !== undefined) {
-              n.x = old.x; n.y = old.y; n.z = old.z;
-              n.vx = 0; n.vy = 0; n.vz = 0;
-            }
-          });
-          DATA = delData.graph;
-          neighbors = computeNeighbors(DATA);
-          Graph.graphData(DATA);
-          refreshLegend();
-        }
+        if (delData.graph) replaceGraph(delData.graph);
         panel.classList.remove('open');
         hideAnswerBox();
         _appendLogEntry({
@@ -2530,17 +2530,7 @@ async function rememberFlow(text) {
 }
 
 function liveAddNode(data) {
-  // preserve current positions so the galaxy doesn't jump
-  const positions = new Map();
-  DATA.nodes.forEach(n => positions.set(n.path + '|' + n.label, n));
-  const g = data.graph;
-  g.nodes.forEach(n => {
-    const old = positions.get(n.path + '|' + n.label);
-    if (old && old.x !== undefined) {
-      n.x = old.x; n.y = old.y; n.z = old.z;
-      n.vx = 0; n.vy = 0; n.vz = 0;
-    }
-  });
+  const g = carryOverPositions(data.graph);
 
   // the star is born at the position of its most related node
   const newNode = g.nodes[data.new_id];
@@ -2551,13 +2541,10 @@ function liveAddNode(data) {
     newNode.z = related.z + (Math.random() - 0.5) * 40;
   }
 
-  DATA = g;
-  neighbors = computeNeighbors(DATA);
   focusNode = null;
   activeIds = null;
   highlightLinks.clear();
-  Graph.graphData(DATA);
-  refreshLegend();
+  applyGraph(g);
 
   // birth pulse + camera flight (once the sprite exists)
   setTimeout(() => {

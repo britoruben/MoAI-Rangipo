@@ -49,6 +49,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 import build
+import moai_utils
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 VIEWER_DIR = os.path.join(ROOT, "viewer")
@@ -272,6 +273,7 @@ MAX_QUESTION_CHARS = 2000
 MAX_REMEMBER_CHARS = 1000
 
 ENTITY_ID_RE = re.compile(r"^[a-z0-9_-]{1,50}$")
+NOTE_TYPES = ("note", "idea", "project")  # the user's own notes, not connectors/tools
 
 # Phase 12 — note editing helpers
 _LAST_EDITED_RE = re.compile(r"^\*Last edited: \d{4}-\d{2}-\d{2}\.\*[ \t]*$", re.MULTILINE)
@@ -365,15 +367,7 @@ def load_preferences():
     """{"lang": None, "name": None} if preferences.json is missing or
     malformed — that None-lang sentinel is what tells the viewer this
     installation hasn't gone through the first-run language prompt yet."""
-    if not os.path.isfile(PREFERENCES_FILE):
-        return {"lang": None, "name": None}
-    try:
-        with open(PREFERENCES_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (ValueError, OSError):
-        return {"lang": None, "name": None}
-    if not isinstance(data, dict):
-        return {"lang": None, "name": None}
+    data = moai_utils.read_json_dict(PREFERENCES_FILE, {})
     lang = data.get("lang")
     name = data.get("name")
     return {
@@ -390,7 +384,7 @@ def save_preferences(lang, name):
     if not name:
         raise _RequestError("name must not be empty.", 400)
     prefs = {"lang": lang, "name": name}
-    _save_entity_file(PREFERENCES_FILE, prefs)
+    moai_utils.write_json_atomic(PREFERENCES_FILE, prefs)
     return prefs
 
 
@@ -398,16 +392,43 @@ def load_elevenlabs_config():
     """{} if config-el.json is missing, malformed, or incomplete — ElevenLabs
     is optional, so a broken/absent file must never break /chat or /tts;
     the frontend just falls back to browser speech synthesis."""
-    if not os.path.isfile(CONFIG_EL_FILE):
-        return {}
-    try:
-        with open(CONFIG_EL_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (ValueError, OSError):
-        return {}
-    if not isinstance(data, dict) or not data.get("api_key") or not data.get("voice_id"):
+    data = moai_utils.read_json_dict(CONFIG_EL_FILE, {})
+    if not data.get("api_key") or not data.get("voice_id"):
         return {}
     return data
+
+
+def _post_json(url, headers, payload, timeout, service, detail_keys):
+    """POST `payload` as JSON and return the parsed JSON response.
+
+    Every failure becomes a RuntimeError whose message quotes `service`
+    and, for HTTP errors, the provider's own message dug out of the
+    response body along `detail_keys` (e.g. ("error", "message")).
+    """
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers=dict(headers, **{"content-type": "application/json"}),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise RuntimeError("%s error: %s" % (service, _http_error_message(e, detail_keys)))
+    except urllib.error.URLError as e:
+        raise RuntimeError("Couldn't reach %s: %s" % (service, e.reason))
+
+
+def _http_error_message(exc, detail_keys):
+    """The provider's error message from an HTTPError body, or str(exc)."""
+    try:
+        detail = json.loads(exc.read().decode("utf-8"))
+        for key in detail_keys[:-1]:
+            detail = detail.get(key) or {}
+        return detail.get(detail_keys[-1]) or str(exc)
+    except Exception:
+        return str(exc)
 
 
 def text_to_speech(text, el_config):
@@ -415,50 +436,23 @@ def text_to_speech(text, el_config):
     dict ({"audio_base64": ..., "alignment": {...}, ...}) on success.
     Raises RuntimeError on any failure — callers should treat that as
     'fall back to the browser voice', not a hard error."""
-    body = json.dumps({
-        "text": text,
-        "model_id": el_config.get("model_id") or ELEVENLABS_DEFAULT_MODEL,
-    }).encode("utf-8")
-    url = ELEVENLABS_TTS_URL % urllib.parse.quote(el_config["voice_id"], safe="")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={
-            "content-type": "application/json",
-            "xi-api-key": el_config["api_key"],
-            "accept": "application/json",
+    return _post_json(
+        ELEVENLABS_TTS_URL % urllib.parse.quote(el_config["voice_id"], safe=""),
+        {"xi-api-key": el_config["api_key"], "accept": "application/json"},
+        {
+            "text": text,
+            "model_id": el_config.get("model_id") or ELEVENLABS_DEFAULT_MODEL,
         },
+        timeout=30,
+        service="ElevenLabs",
+        detail_keys=("detail", "message"),
     )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        try:
-            detail = json.loads(e.read().decode("utf-8"))
-            msg = detail.get("detail", {}).get("message", str(e))
-        except Exception:
-            msg = str(e)
-        raise RuntimeError("ElevenLabs error: %s" % msg)
-    except urllib.error.URLError as e:
-        raise RuntimeError("Couldn't reach ElevenLabs: %s" % e.reason)
 
 
 def load_json_list(path, key):
     """Reads connectors.json/tools.json; empty list if missing, malformed,
     or its root isn't the expected object/list shape."""
-    if not os.path.isfile(path):
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (ValueError, OSError):
-        # ValueError covers JSONDecodeError and UnicodeDecodeError
-        return []
-    if not isinstance(data, dict):
-        return []
-    items = data.get(key, [])
-    return items if isinstance(items, list) else []
+    return moai_utils.read_json_items(path, key)
 
 
 def load_graph():
@@ -474,23 +468,35 @@ def load_graph():
     return _graph_cache["graph"]
 
 
+def type_words(node):
+    """Words that name this node's type, in both languages."""
+    node_type = normalize(node.get("type", ""))
+    return TYPE_SYNONYMS.get(node.get("type", ""), {node_type, node_type + "s"})
+
+
+def keyword_score(tokens, node, match_type=False):
+    """Relevance of one node for `tokens`: the title weighs 4, the excerpt 1,
+    and (only where the type itself is searchable) the type name 2."""
+    label = normalize(node["label"])
+    excerpt = normalize(node.get("excerpt", ""))
+    words = type_words(node) if match_type else ()
+    score = 0
+    for t in tokens:
+        if t in label:
+            score += 4
+        if t in excerpt:
+            score += 1
+        if t in words:
+            score += 2
+    return score
+
+
 def score_nodes(question, graph):
     """Keyword matching; the title weighs more. Top 6 with score > 0."""
     tokens = tokenize(question)
     scored = []
     for node in graph["nodes"]:
-        label = normalize(node["label"])
-        excerpt = normalize(node.get("excerpt", ""))
-        node_type = normalize(node.get("type", ""))
-        score = 0
-        type_words = TYPE_SYNONYMS.get(node.get("type", ""), {node_type, node_type + "s"})
-        for t in tokens:
-            if t in label:
-                score += 4
-            if t in excerpt:
-                score += 1
-            if t in type_words:
-                score += 2
+        score = keyword_score(tokens, node, match_type=True)
         if score > 0:
             scored.append((score, node["id"]))
     scored.sort(key=lambda s: (-s[0], s[1]))
@@ -690,44 +696,103 @@ def web_search_tool(model):
 
 def _api_request(config, model, system_prompt, messages):
     """Single HTTP call to the Messages API. Returns the parsed JSON dict."""
-    body = json.dumps({
-        "model": model,
-        "max_tokens": 1536,
-        "system": system_prompt,
-        "messages": messages,
-        "tools": [
-            web_search_tool(model),
-            SAVE_NOTE_TOOL,
-            LIST_NOTES_TOOL,
-            LIST_CONNECTORS_TOOL,
-            LIST_TOOLS_TOOL,
-            DELETE_NOTE_TOOL,
-            MANAGE_CONNECTOR_TOOL,
-            MANAGE_TOOL_TOOL,
-        ],
-    }).encode("utf-8")
-    req = urllib.request.Request(
+    return _post_json(
         API_URL,
-        data=body,
-        method="POST",
-        headers={
-            "content-type": "application/json",
-            "x-api-key": config["api_key"],
-            "anthropic-version": API_VERSION,
+        {"x-api-key": config["api_key"], "anthropic-version": API_VERSION},
+        {
+            "model": model,
+            "max_tokens": 1536,
+            "system": system_prompt,
+            "messages": messages,
+            "tools": [
+                web_search_tool(model),
+                SAVE_NOTE_TOOL,
+                LIST_NOTES_TOOL,
+                LIST_CONNECTORS_TOOL,
+                LIST_TOOLS_TOOL,
+                DELETE_NOTE_TOOL,
+                MANAGE_CONNECTOR_TOOL,
+                MANAGE_TOOL_TOOL,
+            ],
         },
+        timeout=120,
+        service="Anthropic API",
+        detail_keys=("error", "message"),
     )
+
+
+def _summarize_entities(path, key, empty_message):
+    """Entries of connectors.json/tools.json as 'label (status)', joined."""
+    return "; ".join(
+        "%s (%s)" % (item.get("label", item.get("id", "?")), item.get("status", "?"))
+        for item in load_json_list(path, key)
+    ) or empty_message
+
+
+def _tool_save_note(tool_input):
+    result = remember(tool_input.get("text", ""))
+    return "Note saved: '%s'" % result["title"], result
+
+
+def _tool_list_notes(tool_input):
+    notes = find_notes(tool_input.get("query"))
+    if not notes:
+        return "No matching notes found.", None
+    return "; ".join("%s (%s)" % (n["label"], n["type"]) for n in notes[:20]), None
+
+
+def _tool_delete_note(tool_input):
+    deleted = delete_note_by_title(tool_input.get("title", ""))
+    return "Deleted note '%s'." % deleted["title"], None
+
+
+def _tool_manage_entity(path, key, label, tool_input):
+    manage_entity(
+        path, key, tool_input.get("action", ""), tool_input.get("id", ""), tool_input,
+    )
+    return "%s '%s' %sd." % (label, tool_input.get("id"), tool_input.get("action")), None
+
+
+# name -> (handler(tool_input) -> (result_text, note_result), failure prefix).
+# The lambdas read the *_FILE globals when called, not when defined.
+CHAT_TOOLS = {
+    "save_note": (_tool_save_note, "Failed to save note"),
+    "list_notes": (_tool_list_notes, "Failed to list notes"),
+    "list_connectors": (
+        lambda _input: (_summarize_entities(CONNECTORS_FILE, "connectors",
+                                           "No connectors configured yet."), None),
+        "Failed to list connectors",
+    ),
+    "list_tools": (
+        lambda _input: (_summarize_entities(TOOLS_FILE, "tools",
+                                           "No tools configured yet."), None),
+        "Failed to list tools",
+    ),
+    "delete_note": (_tool_delete_note, "Failed to delete"),
+    "manage_connector": (
+        lambda tool_input: _tool_manage_entity(
+            CONNECTORS_FILE, "connectors", "Connector", tool_input),
+        "Failed",
+    ),
+    "manage_tool": (
+        lambda tool_input: _tool_manage_entity(TOOLS_FILE, "tools", "Tool", tool_input),
+        "Failed",
+    ),
+}
+
+
+def run_chat_tool(name, tool_input):
+    """Runs the local tool the model asked for and returns
+    (result_text, note_result). Failures come back as text: the model reads
+    them and explains itself, instead of the whole /chat turn dying."""
+    entry = CHAT_TOOLS.get(name)
+    if entry is None:
+        return "Unknown tool.", None
+    handler, failure_prefix = entry
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        try:
-            detail = json.loads(e.read().decode("utf-8"))
-            msg = detail.get("error", {}).get("message", str(e))
-        except Exception:
-            msg = str(e)
-        raise RuntimeError("Anthropic API error: %s" % msg)
-    except urllib.error.URLError as e:
-        raise RuntimeError("Couldn't connect to the API: %s" % e.reason)
+        return handler(tool_input or {})
+    except Exception as exc:
+        return "%s: %s" % (failure_prefix, exc), None
 
 
 def call_claude(config, model, system_prompt, messages):
@@ -766,74 +831,10 @@ def call_claude(config, model, system_prompt, messages):
                 if block.get("type") != "tool_use":
                     continue
                 name = block.get("name")
-                tool_input = block.get("input") or {}
-                result_str = "Unknown tool."
                 tools_used.append(name)
-
-                if name == "save_note":
-                    text = tool_input.get("text", "")
-                    try:
-                        note_result = remember(text)
-                        result_str = "Note saved: '%s'" % note_result["title"]
-                    except Exception as exc:
-                        result_str = "Failed to save note: %s" % exc
-
-                elif name == "list_notes":
-                    try:
-                        notes = find_notes(tool_input.get("query"))
-                        if notes:
-                            result_str = "; ".join(
-                                "%s (%s)" % (n["label"], n["type"]) for n in notes[:20]
-                            )
-                        else:
-                            result_str = "No matching notes found."
-                    except Exception as exc:
-                        result_str = "Failed to list notes: %s" % exc
-
-                elif name == "list_connectors":
-                    items = load_json_list(CONNECTORS_FILE, "connectors")
-                    result_str = "; ".join(
-                        "%s (%s)" % (c.get("label", c.get("id", "?")), c.get("status", "?"))
-                        for c in items
-                    ) or "No connectors configured yet."
-
-                elif name == "list_tools":
-                    items = load_json_list(TOOLS_FILE, "tools")
-                    result_str = "; ".join(
-                        "%s (%s)" % (t.get("label", t.get("id", "?")), t.get("status", "?"))
-                        for t in items
-                    ) or "No tools configured yet."
-
-                elif name == "delete_note":
-                    try:
-                        deleted = delete_note_by_title(tool_input.get("title", ""))
-                        result_str = "Deleted note '%s'." % deleted["title"]
-                    except Exception as exc:
-                        result_str = "Failed to delete: %s" % exc
-
-                elif name == "manage_connector":
-                    try:
-                        manage_entity(
-                            CONNECTORS_FILE, "connectors",
-                            tool_input.get("action", ""), tool_input.get("id", ""), tool_input,
-                        )
-                        result_str = "Connector '%s' %sd." % (
-                            tool_input.get("id"), tool_input.get("action")
-                        )
-                    except Exception as exc:
-                        result_str = "Failed: %s" % exc
-
-                elif name == "manage_tool":
-                    try:
-                        manage_entity(
-                            TOOLS_FILE, "tools",
-                            tool_input.get("action", ""), tool_input.get("id", ""), tool_input,
-                        )
-                        result_str = "Tool '%s' %sd." % (
-                            tool_input.get("id"), tool_input.get("action")
-                        )
-                    except Exception as exc:
-                        result_str = "Failed: %s" % exc
+                result_str, tool_note = run_chat_tool(name, block.get("input"))
+                if tool_note is not None:
+                    note_result = tool_note
 
                 tool_results.append({
                     "type": "tool_result",
@@ -950,6 +951,19 @@ def write_capture(text):
     return rel, title, path
 
 
+def rebuild_galaxy():
+    """Regenerates viewer/graph-data.js and returns the fresh graph.
+
+    Callers must hold _build_lock: the build reads every note on disk, so a
+    concurrent write would otherwise land in a half-scanned galaxy.
+    """
+    try:
+        build.build()      # atomic write of viewer/graph-data.js
+    except Exception as e:
+        raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
+    return load_graph()    # mtime changed -> reload
+
+
 def remember(text):
     """Writes the note, rebuilds the galaxy, and locates the new node.
 
@@ -959,15 +973,14 @@ def remember(text):
     with _build_lock:
         rel_path, title, abs_path = write_capture(text)
         try:
-            build.build()      # regenerates viewer/graph-data.js (atomic)
-        except Exception as e:
+            graph = rebuild_galaxy()
+        except RuntimeError:
             # no orphan note: if the build fails, the file gets removed
             try:
                 os.remove(abs_path)
             except OSError:
                 pass
-            raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
-        graph = load_graph()   # mtime changed -> reload
+            raise
 
     new_id = None
     for node in graph["nodes"]:
@@ -996,13 +1009,17 @@ def remember(text):
 
 # --------------------------------------------------------- notes: list/search/delete
 
+def note_nodes(graph):
+    """Only the user's own notes, ideas, and projects (no connectors/tools)."""
+    return [n for n in graph["nodes"] if n.get("type") in NOTE_TYPES]
+
+
 def find_notes(query=None):
     """Notes/ideas/projects matching query (label/excerpt keyword score),
     most relevant first. With no query, or a query with no scoreable
     tokens, returns everything of those types. With tokens but no match,
     returns an empty list — an honest 'nothing found' beats a full dump."""
-    graph = load_graph()
-    candidates = [n for n in graph["nodes"] if n.get("type") in ("note", "idea", "project")]
+    candidates = note_nodes(load_graph())
     if not query:
         return candidates
     tokens = tokenize(query)
@@ -1010,9 +1027,7 @@ def find_notes(query=None):
         return candidates
     scored = []
     for n in candidates:
-        label = normalize(n["label"])
-        excerpt = normalize(n.get("excerpt", ""))
-        score = sum(4 for t in tokens if t in label) + sum(1 for t in tokens if t in excerpt)
+        score = keyword_score(tokens, n)
         if score > 0:
             scored.append((score, n))
     scored.sort(key=lambda s: -s[0])
@@ -1030,8 +1045,7 @@ def delete_note_by_title(title):
     if not title:
         raise RuntimeError("No title given.")
     tokens = tokenize(title)
-    graph = load_graph()
-    candidates = [n for n in graph["nodes"] if n.get("type") in ("note", "idea", "project")]
+    candidates = note_nodes(load_graph())
     matches = [n for n in candidates if tokens and all(t in normalize(n["label"]) for t in tokens)]
     if not matches:
         scored = find_notes(title)
@@ -1046,34 +1060,11 @@ def delete_note_by_title(title):
     abs_path = _safe_editable_path(target["path"])
     with _build_lock:
         os.remove(abs_path)
-        try:
-            build.build()
-        except Exception as e:
-            raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
-        graph = load_graph()
+        graph = rebuild_galaxy()
     return {"graph": graph, "title": target["label"]}
 
 
 # ------------------------------------------------------- connectors/tools CRUD
-
-def _load_entity_file(path):
-    if not os.path.isfile(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (ValueError, OSError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _save_entity_file(path, data):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
-
 
 def manage_entity(path, key, action, entity_id, fields):
     """Create/update/delete one entry of connectors.json or tools.json,
@@ -1092,7 +1083,7 @@ def manage_entity(path, key, action, entity_id, fields):
         )
 
     with _build_lock:
-        data = _load_entity_file(path)
+        data = moai_utils.read_json_dict(path, {})
         items = data.get(key, [])
         if not isinstance(items, list):
             items = []
@@ -1126,52 +1117,49 @@ def manage_entity(path, key, action, entity_id, fields):
             raise RuntimeError("Unknown action: %s" % action)
 
         data[key] = items
-        _save_entity_file(path, data)
-        try:
-            build.build()
-        except Exception as e:
-            raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
-        graph = load_graph()
+        moai_utils.write_json_atomic(path, data)
+        graph = rebuild_galaxy()
 
     return {"graph": graph, "items": items}
 
 
-def update_note_by_path(rel, content):
-    """Update one local markdown file and rebuild the graph."""
+def _existing_note_path(rel):
+    """(relative, absolute) path of an editable note that exists on disk.
+    Raises _RequestError with the right status if it doesn't."""
     rel = (rel or "").strip()
     if not rel:
-        raise RuntimeError("Missing note path.")
+        raise _RequestError("missing path", 400)
     abs_path = _safe_editable_path(rel)
     if not os.path.isfile(abs_path):
-        raise RuntimeError("Note not found.")
+        raise _RequestError("note not found", 404)
+    return rel, abs_path
+
+
+def read_note_by_path(rel):
+    """Raw markdown of one local note."""
+    rel, abs_path = _existing_note_path(rel)
+    with open(abs_path, "r", encoding="utf-8") as f:
+        return {"path": rel, "content": f.read()}
+
+
+def update_note_by_path(rel, content):
+    """Update one local markdown file and rebuild the graph."""
+    rel, abs_path = _existing_note_path(rel)
     content = _upsert_last_edited(content or "", datetime.date.today().isoformat())
     with _build_lock:
         with open(abs_path, "w", encoding="utf-8") as f:
             f.write(content)
-        try:
-            build.build()
-        except Exception as e:
-            raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
-        graph = load_graph()
+        graph = rebuild_galaxy()
     node_id = next((n["id"] for n in graph["nodes"] if n.get("path") == rel), None)
     return {"graph": graph, "node_id": node_id, "path": rel}
 
 
 def delete_note_by_path(rel):
     """Delete exactly one local markdown file and rebuild the graph."""
-    rel = (rel or "").strip()
-    if not rel:
-        raise RuntimeError("Missing note path.")
-    abs_path = _safe_editable_path(rel)
-    if not os.path.isfile(abs_path):
-        raise RuntimeError("Note not found.")
+    rel, abs_path = _existing_note_path(rel)
     with _build_lock:
         os.remove(abs_path)
-        try:
-            build.build()
-        except Exception as e:
-            raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
-        graph = load_graph()
+        graph = rebuild_galaxy()
     return {"graph": graph, "path": rel}
 
 
@@ -1184,12 +1172,7 @@ def execute_dev_operation(operation, payload):
     if operation == "notes.list":
         return {"items": find_notes(payload.get("query"))}
     if operation == "notes.read":
-        rel = (payload.get("path") or "").strip()
-        abs_path = _safe_editable_path(rel)
-        if not os.path.isfile(abs_path):
-            raise RuntimeError("Note not found.")
-        with open(abs_path, "r", encoding="utf-8") as f:
-            return {"path": rel, "content": f.read()}
+        return read_note_by_path(payload.get("path"))
     if operation == "notes.create":
         return remember(payload.get("text", ""))
     if operation == "notes.update":
@@ -1212,8 +1195,7 @@ def execute_dev_operation(operation, payload):
 
     if operation == "graph.rebuild":
         with _build_lock:
-            build.build()
-            return {"graph": load_graph()}
+            return {"graph": rebuild_galaxy()}
 
     if operation in {"web.search", "chat.ask"}:
         raise _RequestError("External AI and web search are disabled in Dev mode.", 403)
@@ -1283,9 +1265,7 @@ class MoaiHandler(SimpleHTTPRequestHandler):
                 self._send_json({"error": str(e)}, 500)
             return
         if path == "/notes":
-            params = dict(urllib.parse.parse_qsl(
-                urllib.parse.urlparse(self.path).query
-            ))
+            params = self._query_params()
             try:
                 self._send_json({"notes": find_notes(params.get("q", "").strip() or None)})
             except Exception as e:
@@ -1319,32 +1299,17 @@ class MoaiHandler(SimpleHTTPRequestHandler):
             raise _RequestError("Request too large.", 413)
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
-    def do_POST(self):
+    def _dispatch(self, routes):
+        """Runs the handler for this request's path, turning every failure into
+        a JSON error: _RequestError keeps its status, RuntimeError is a message
+        the user is meant to read, and anything else stays a generic 500 so
+        internals never leak into the browser."""
+        handler = routes.get(self.path.split("?", 1)[0])
+        if handler is None:
+            self._send_json({"error": "not found"}, 404)
+            return
         try:
-            if self.path == "/runtime":
-                data = self._read_body(1024)
-                self._send_json(set_runtime_mode((data.get("mode") or "").strip()))
-            elif self.path == "/preferences":
-                data = self._read_body(1024)
-                self._send_json(save_preferences(data.get("lang"), data.get("name")))
-            elif self.path == "/dev/execute":
-                data = self._read_body(MAX_BODY_DEV)
-                result = execute_dev_operation(data.get("operation", ""), data.get("payload", {}))
-                self._send_json({"ok": True, "operation": data.get("operation", ""), "result": result})
-            elif self.path == "/chat":
-                self._handle_chat()
-            elif self.path == "/remember":
-                self._handle_remember()
-            elif self.path == "/edit":
-                self._handle_edit()
-            elif self.path == "/tts":
-                self._handle_tts()
-            elif self.path == "/connectors":
-                self._handle_entity_action(CONNECTORS_FILE, "connectors", "create")
-            elif self.path == "/tools":
-                self._handle_entity_action(TOOLS_FILE, "tools", "create")
-            else:
-                self._send_json({"error": "not found"}, 404)
+            handler()
         except _RequestError as e:
             self._send_json({"error": str(e)}, e.status)
         except RuntimeError as e:
@@ -1352,48 +1317,56 @@ class MoaiHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             print("MoAI internal error: %s" % e, file=sys.stderr)
             self._send_json({"error": "Something went wrong on Moai's side. Try again."}, 500)
+
+    def _handle_runtime_post(self):
+        data = self._read_body(1024)
+        self._send_json(set_runtime_mode((data.get("mode") or "").strip()))
+
+    def _handle_preferences_post(self):
+        data = self._read_body(1024)
+        self._send_json(save_preferences(data.get("lang"), data.get("name")))
+
+    def _handle_dev_execute(self):
+        data = self._read_body(MAX_BODY_DEV)
+        operation = data.get("operation", "")
+        result = execute_dev_operation(operation, data.get("payload", {}))
+        self._send_json({"ok": True, "operation": operation, "result": result})
+
+    def do_POST(self):
+        self._dispatch({
+            "/runtime": self._handle_runtime_post,
+            "/preferences": self._handle_preferences_post,
+            "/dev/execute": self._handle_dev_execute,
+            "/chat": self._handle_chat,
+            "/remember": self._handle_remember,
+            "/edit": self._handle_edit,
+            "/tts": self._handle_tts,
+            "/connectors": lambda: self._handle_entity_action(
+                CONNECTORS_FILE, "connectors", "create"),
+            "/tools": lambda: self._handle_entity_action(
+                TOOLS_FILE, "tools", "create"),
+        })
 
     def do_PUT(self):
-        try:
-            if self.path == "/connectors":
-                self._handle_entity_action(CONNECTORS_FILE, "connectors", "update")
-            elif self.path == "/tools":
-                self._handle_entity_action(TOOLS_FILE, "tools", "update")
-            else:
-                self._send_json({"error": "not found"}, 404)
-        except _RequestError as e:
-            self._send_json({"error": str(e)}, e.status)
-        except RuntimeError as e:
-            self._send_json({"error": str(e)})
-        except Exception as e:
-            print("MoAI internal error: %s" % e, file=sys.stderr)
-            self._send_json({"error": "Something went wrong on Moai's side. Try again."}, 500)
+        self._dispatch({
+            "/connectors": lambda: self._handle_entity_action(
+                CONNECTORS_FILE, "connectors", "update"),
+            "/tools": lambda: self._handle_entity_action(
+                TOOLS_FILE, "tools", "update"),
+        })
 
     def do_DELETE(self):
-        path = self.path.split("?", 1)[0]
-        try:
-            if path == "/note":
-                self._handle_note_delete()
-            elif path == "/connectors":
-                self._handle_entity_action(CONNECTORS_FILE, "connectors", "delete")
-            elif path == "/tools":
-                self._handle_entity_action(TOOLS_FILE, "tools", "delete")
-            else:
-                self._send_json({"error": "not found"}, 404)
-        except _RequestError as e:
-            self._send_json({"error": str(e)}, e.status)
-        except RuntimeError as e:
-            self._send_json({"error": str(e)})
-        except Exception as e:
-            print("MoAI internal error: %s" % e, file=sys.stderr)
-            self._send_json({"error": "Something went wrong on Moai's side. Try again."}, 500)
+        self._dispatch({
+            "/note": self._handle_note_delete,
+            "/connectors": lambda: self._handle_entity_action(
+                CONNECTORS_FILE, "connectors", "delete"),
+            "/tools": lambda: self._handle_entity_action(
+                TOOLS_FILE, "tools", "delete"),
+        })
 
     def _handle_entity_action(self, file_path, key, action):
         if action == "delete":
-            params = dict(urllib.parse.parse_qsl(
-                urllib.parse.urlparse(self.path).query
-            ))
-            entity_id = params.get("id", "").strip()
+            entity_id = self._query_params().get("id", "").strip()
             fields = {}
         else:
             data = self._read_body(MAX_BODY_ENTITY)
@@ -1407,62 +1380,23 @@ class MoaiHandler(SimpleHTTPRequestHandler):
             raise _RequestError(str(e), 409)
         self._send_json(result)
 
-    def _handle_note_delete(self):
-        params = dict(urllib.parse.parse_qsl(
+    def _query_params(self):
+        return dict(urllib.parse.parse_qsl(
             urllib.parse.urlparse(self.path).query
         ))
-        rel = params.get("path", "").strip()
-        if not rel:
-            raise _RequestError("missing path", 400)
-        abs_path = _safe_editable_path(rel)
-        if not os.path.isfile(abs_path):
-            raise _RequestError("note not found", 404)
-        with _build_lock:
-            os.remove(abs_path)
-            try:
-                build.build()
-            except Exception as e:
-                raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
-            graph = load_graph()
-        self._send_json({"graph": graph})
+
+    def _handle_note_delete(self):
+        result = delete_note_by_path(self._query_params().get("path", ""))
+        self._send_json({"graph": result["graph"]})
 
     def _handle_note(self):
-        params = dict(urllib.parse.parse_qsl(
-            urllib.parse.urlparse(self.path).query
-        ))
-        rel = params.get("path", "").strip()
-        if not rel:
-            raise _RequestError("missing path", 400)
-        abs_path = _safe_editable_path(rel)
-        if not os.path.isfile(abs_path):
-            raise _RequestError("note not found", 404)
-        with open(abs_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        self._send_json({"content": content})
+        result = read_note_by_path(self._query_params().get("path", ""))
+        self._send_json({"content": result["content"]})
 
     def _handle_edit(self):
         data = self._read_body(MAX_BODY_EDIT)
-        rel     = (data.get("path") or "").strip()
-        content = data.get("content") or ""
-        if not rel:
-            raise _RequestError("missing path", 400)
-        abs_path = _safe_editable_path(rel)
-        if not os.path.isfile(abs_path):
-            raise _RequestError("note not found", 404)
-        today = datetime.date.today().isoformat()
-        content = _upsert_last_edited(content, today)
-        with _build_lock:
-            with open(abs_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            try:
-                build.build()
-            except Exception as e:
-                raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
-            graph = load_graph()
-        node_id = next(
-            (n["id"] for n in graph["nodes"] if n.get("path") == rel), None
-        )
-        self._send_json({"graph": graph, "node_id": node_id})
+        result = update_note_by_path(data.get("path"), data.get("content") or "")
+        self._send_json({"graph": result["graph"], "node_id": result["node_id"]})
 
     def _handle_tts(self):
         data = self._read_body(MAX_BODY_TTS)
