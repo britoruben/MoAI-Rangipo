@@ -332,7 +332,7 @@ TYPE_SYNONYMS = {
 
 _sessions = {}
 _session_times = {}          # session_id -> float (last access, for eviction)
-_graph_cache = {"mtime": None, "graph": None}
+_graph_cache = {"key": None, "graph": None}
 
 # ThreadingHTTPServer: serialize anything that mutates shared state
 _build_lock = threading.Lock()      # note writes + graph build
@@ -462,15 +462,21 @@ def load_json_list(path, key):
 
 
 def load_graph():
-    """Reads viewer/graph-data.js (cached by mtime, refreshed after a build)."""
-    mtime = os.path.getmtime(GRAPH_FILE)
-    if _graph_cache["mtime"] != mtime:
+    """Reads viewer/graph-data.js, cached until the file changes.
+
+    The cache key pairs mtime with size: two rebuilds landing inside the
+    same filesystem timestamp tick (a /remember immediately followed by a
+    /chat, for instance) share an mtime, and mtime alone would then serve
+    a stale galaxy."""
+    st = os.stat(GRAPH_FILE)
+    key = (st.st_mtime_ns, st.st_size)
+    if _graph_cache["key"] != key:
         with open(GRAPH_FILE, "r", encoding="utf-8") as f:
             raw = f.read()
         start = raw.index("const GRAPH =") + len("const GRAPH =")
         payload = raw[start:].strip().rstrip(";").strip()
         _graph_cache["graph"] = json.loads(payload)
-        _graph_cache["mtime"] = mtime
+        _graph_cache["key"] = key
     return _graph_cache["graph"]
 
 

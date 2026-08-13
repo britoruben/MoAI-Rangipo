@@ -120,6 +120,69 @@ class TestCollectMdNodes(unittest.TestCase):
         self.assertIn("user-note", entries[0]["stem"])
 
 
+class TestMdLabel(unittest.TestCase):
+    def test_uses_first_heading(self):
+        self.assertEqual(build.md_label("# Real Title\ntext", "some-stem"), "Real Title")
+
+    def test_ignores_headings_inside_code_fences(self):
+        raw = "```\n# Not A Heading\n```\nbody"
+        self.assertEqual(build.md_label(raw, "my-note"), "My note")
+
+    def test_falls_back_to_humanized_stem(self):
+        self.assertEqual(build.md_label("no heading here", "my-cool-note"), "My cool note")
+
+
+class TestCollectMdNodesEdgeCases(unittest.TestCase):
+    def test_missing_docs_dir_returns_empty(self):
+        with unittest.mock.patch.object(build, "DOCS_DIR", "/nonexistent-docs-dir"):
+            self.assertEqual(build.collect_md_nodes(), [])
+
+
+class TestCollectJsonNodes(unittest.TestCase):
+    def _write(self, td, name, content):
+        path = os.path.join(td.root, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return path
+
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(
+            build.collect_json_nodes("/nonexistent.json", "connectors", "connector"), []
+        )
+
+    def test_invalid_json_returns_empty(self):
+        with _TempDocs() as td:
+            path = self._write(td, "connectors.json", "{not json")
+            self.assertEqual(build.collect_json_nodes(path, "connectors", "connector"), [])
+
+    def test_non_dict_root_returns_empty(self):
+        with _TempDocs() as td:
+            path = self._write(td, "connectors.json", "[1, 2, 3]")
+            self.assertEqual(build.collect_json_nodes(path, "connectors", "connector"), [])
+
+    def test_non_list_key_returns_empty(self):
+        with _TempDocs() as td:
+            path = self._write(td, "tools.json", json.dumps({"tools": {"a": 1}}))
+            self.assertEqual(build.collect_json_nodes(path, "tools", "tool"), [])
+
+    def test_non_dict_items_are_skipped(self):
+        with _TempDocs() as td:
+            payload = {"tools": ["oops", {"id": "tts", "label": "TTS", "status": "active"}]}
+            path = self._write(td, "tools.json", json.dumps(payload))
+            entries = build.collect_json_nodes(path, "tools", "tool")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["label"], "TTS")
+        self.assertEqual(entries[0]["type"], "tool")
+        self.assertEqual(entries[0]["path"], "tools.json#tts")
+
+    def test_label_falls_back_to_id(self):
+        with _TempDocs() as td:
+            payload = {"connectors": [{"id": "notion"}]}
+            path = self._write(td, "connectors.json", json.dumps(payload))
+            entries = build.collect_json_nodes(path, "connectors", "connector")
+        self.assertEqual(entries[0]["label"], "notion")
+
+
 class TestBuildOutput(unittest.TestCase):
     def _run_build(self, td):
         out_file = os.path.join(td.root, "graph-data.js")
@@ -161,6 +224,48 @@ class TestBuildOutput(unittest.TestCase):
         self.assertIn("nodes", graph)
         self.assertIn("links", graph)
         self.assertIn("mtime", graph)
+
+    def test_long_excerpt_is_truncated_on_a_word_boundary(self):
+        with _TempDocs() as td:
+            body = " ".join(["word%d" % i for i in range(400)])
+            td.write("long.md", "# Long\n%s" % body)
+            graph = self._run_build(td)
+        excerpt = graph["nodes"][0]["excerpt"]
+        self.assertTrue(excerpt.endswith("…"))
+        self.assertLessEqual(len(excerpt), build.EXTRACT_LEN + 1)
+        self.assertNotIn(" …", excerpt)
+
+    def test_capabilities_link_to_the_hub_project(self):
+        with _TempDocs() as td:
+            hub_rel = "projects/example-project-moai-galaxy.md"
+            td.write(hub_rel, "# MoAI Galaxy\nThe central project.")
+            connectors = os.path.join(td.root, "connectors.json")
+            tools = os.path.join(td.root, "tools.json")
+            with open(connectors, "w", encoding="utf-8") as f:
+                json.dump({"connectors": [{"id": "notion", "label": "Notion"}]}, f)
+            with open(tools, "w", encoding="utf-8") as f:
+                json.dump({"tools": [{"id": "tts", "label": "Speech"}]}, f)
+            out_file = os.path.join(td.root, "graph-data.js")
+            with td.patch(), \
+                 unittest.mock.patch.object(build, "OUT_FILE", out_file), \
+                 unittest.mock.patch.object(build, "CONNECTORS_FILE", connectors), \
+                 unittest.mock.patch.object(build, "TOOLS_FILE", tools), \
+                 unittest.mock.patch.object(build, "HUB_PATH", hub_rel):
+                build.build()
+            with open(out_file, encoding="utf-8") as f:
+                raw = f.read()
+        start = raw.index("const GRAPH =") + len("const GRAPH =")
+        graph = json.loads(raw[start:].strip().rstrip(";").strip())
+        by_path = {n["path"]: n["id"] for n in graph["nodes"]}
+        hub_id = by_path[hub_rel]
+        linked = set()
+        for link in graph["links"]:
+            if link["source"] == hub_id:
+                linked.add(link["target"])
+            elif link["target"] == hub_id:
+                linked.add(link["source"])
+        self.assertIn(by_path["connectors.json#notion"], linked)
+        self.assertIn(by_path["tools.json#tts"], linked)
 
 
 if __name__ == "__main__":
