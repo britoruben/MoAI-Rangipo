@@ -1375,6 +1375,7 @@ const powersPanel = document.getElementById('powers-panel');
 const powersList = document.getElementById('powers-list');
 const runtimeStateEl = document.getElementById('runtime-state');
 const runtimeToggle = document.getElementById('runtime-toggle');
+let devAvailable = false;
 const devConsole = document.getElementById('dev-console');
 const devOperation = document.getElementById('dev-operation');
 const devPayload = document.getElementById('dev-payload');
@@ -1407,12 +1408,15 @@ function setDevPayload() {
 function renderRuntime(info) {
   runtimeMode = info.mode === 'dev' ? 'dev' : 'production';
   const isDev = runtimeMode === 'dev';
+  devAvailable = info.dev_available !== false;
   runtimeStateEl.textContent = isDev
     ? 'Dev · local files only · external AI disabled'
     : 'Production · external AI enabled';
   runtimeStateEl.classList.toggle('dev', isDev);
   runtimeToggle.textContent = isDev ? 'Back to Production' : 'Enable Dev';
   runtimeToggle.classList.toggle('dev', isDev);
+  runtimeToggle.hidden = !isDev && !devAvailable;
+  runtimeToggle.title = devAvailable ? '' : 'Start the server with MOAI_DEV=1 to enable Dev mode.';
   devConsole.hidden = !isDev;
 }
 
@@ -1728,11 +1732,11 @@ let _mermaidLib = null;
 
 async function _ensureLibs() {
   if (!_markedLib) {
-    const m = await import('https://esm.sh/marked@14');
+    const m = await import('https://esm.sh/marked@14.1.4');
     _markedLib = m.marked;
   }
   if (!_mermaidLib) {
-    const m = await import('https://esm.sh/mermaid@11');
+    const m = await import('https://esm.sh/mermaid@11.16.1');
     _mermaidLib = m.default;
     _mermaidLib.initialize({ startOnLoad: false, theme: 'dark', darkMode: true });
   }
@@ -1751,15 +1755,20 @@ async function openDocView(path) {
 
     // mark mermaid blocks before passing to marked (marked will escape HTML inside code fences)
     const mermaidBlocks = [];
-    const mdSafe = data.content.replace(/```mermaid\n([\s\S]*?)```/g, (_, code) => {
+    let mdSafe = data.content.replace(/```mermaid\n([\s\S]*?)```/g, (_, code) => {
       const idx = mermaidBlocks.push(code.trim()) - 1;
-      return `<MERMAID_BLOCK_${idx}>`;
+      return `@@MERMAID_BLOCK_${idx}@@`;
     });
+
+    // Note bodies are untrusted: they can be written by the model from web
+    // search results or dictated content. marked passes raw HTML through,
+    // so neutralise tags before parsing — markdown syntax needs no < or >.
+    mdSafe = mdSafe.replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
     let html = _markedLib(mdSafe);
 
     // replace markers with actual mermaid wrap elements
-    html = html.replace(/<p><MERMAID_BLOCK_(\d+)><\/p>|<MERMAID_BLOCK_(\d+)>/g, (_, a, b) => {
+    html = html.replace(/<p>@@MERMAID_BLOCK_(\d+)@@<\/p>|@@MERMAID_BLOCK_(\d+)@@/g, (_, a, b) => {
       const idx = parseInt(a ?? b, 10);
       const code = escapeHtml(mermaidBlocks[idx] || '');
       return `<div class="mermaid-wrap"><pre class="mermaid" data-idx="${idx}"></pre><button class="mermaid-dl" data-idx="${idx}">↓ SVG</button></div>`;

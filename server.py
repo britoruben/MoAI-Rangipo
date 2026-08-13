@@ -7,7 +7,9 @@ MoAI — server.py
 - GET/POST /preferences : language ("es"/"en") + addressed name, persisted to
                         preferences.json (unlike /runtime, this survives a
                         restart).
-- POST   /dev/execute : whitelisted local operations in Dev mode only.
+- POST   /dev/execute : whitelisted local operations in Dev mode only, and
+                        Dev mode itself only exists when the server was
+                        started with MOAI_DEV=1 (or --dev).
 - GET    /powers      : builtin powers + connectors.json + tools.json, merged.
 - GET    /notes       : list/search notes-ideas-projects (?q=... optional).
 - GET    /note        : raw markdown content of one note (?path=...).
@@ -29,6 +31,12 @@ MoAI — server.py
 - DELETE /note        : deletes a note (?path=...).
 - GET/POST/PUT/DELETE /connectors, /tools : CRUD over connectors.json and
                         tools.json (id-keyed entries).
+
+Every request must come from the viewer this server itself serves: the
+Host header has to be one of our own loopback names (blocks DNS
+rebinding) and any Origin/Sec-Fetch-Site the browser sends has to be
+same-origin (blocks cross-site forgery of note writes, deletions, and
+API-key-spending /chat and /tts calls).
 
 Standard library only. The API key lives in config.json (root, outside
 viewer/) and never gets sent to the browser.
@@ -66,6 +74,17 @@ PORT = 4700
 RUNTIME_LOCK = threading.Lock()
 RUNTIME_MODE = "production"
 MAX_BODY_DEV = 65_536
+
+# Only these Host/Origin values belong to this server. Everything else is
+# either a DNS-rebinding attempt (an attacker domain resolving to 127.0.0.1)
+# or a cross-site request forged by a page the user happens to be visiting.
+ALLOWED_HOSTS = frozenset(
+    "%s:%d" % (h, PORT) for h in ("localhost", "127.0.0.1", "[::1]", "::1")
+)
+ALLOWED_ORIGINS = frozenset(
+    "http://%s:%d" % (h, PORT) for h in ("localhost", "127.0.0.1", "[::1]")
+)
+DEV_MODE_ENV = "MOAI_DEV"
 
 # User-facing CRUD actions. The menu describes operations over resources;
 # backend tool names stay in tools.json and are not duplicated here.
@@ -109,13 +128,28 @@ def runtime_status():
         "external_ai": mode == "production",
         "web_search": mode == "production",
         "local_tools": True,
+        "dev_available": dev_mode_allowed(),
     }
+
+
+def dev_mode_allowed():
+    """Dev mode exposes /dev/execute, which reads and writes local files, so
+    it can only be armed when the server is started explicitly for it
+    (MOAI_DEV=1 or `server.py --dev`) — never by an HTTP request."""
+    if os.environ.get(DEV_MODE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    return "--dev" in sys.argv[1:]
 
 
 def set_runtime_mode(mode):
     global RUNTIME_MODE
     if mode not in {"production", "dev"}:
         raise _RequestError("mode must be 'production' or 'dev'", 400)
+    if mode == "dev" and not dev_mode_allowed():
+        raise _RequestError(
+            "Dev mode is not available: restart the server with MOAI_DEV=1 "
+            "(or --dev) to enable it.", 403,
+        )
     with RUNTIME_LOCK:
         RUNTIME_MODE = mode
     return runtime_status()
@@ -283,8 +317,10 @@ def _safe_editable_path(rel):
     Raises _RequestError on any invalid or out-of-bounds path."""
     if not rel or ".." in rel.replace("\\", "/").split("/"):
         raise _RequestError("Invalid path.", 400)
-    abs_path = os.path.normpath(os.path.join(ROOT, rel.replace("/", os.sep)))
-    docs_abs = os.path.abspath(DOCS_DIR)
+    # realpath, not normpath: a symlink inside docs/ must not become a
+    # write primitive for files anywhere else on the machine.
+    abs_path = os.path.realpath(os.path.join(ROOT, rel.replace("/", os.sep)))
+    docs_abs = os.path.realpath(DOCS_DIR)
     if not (abs_path.startswith(docs_abs + os.sep) or abs_path == docs_abs):
         raise _RequestError("Path is outside the allowed area.", 403)
     for skip in ("en", "es"):
@@ -1232,12 +1268,48 @@ class _RequestError(Exception):
 class MoaiHandler(SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
         super().end_headers()
 
     def log_message(self, fmt, *args):
         pass
 
+    def _check_origin(self):
+        """Reject requests that don't come from the viewer served by this
+        server: an attacker page can't read our replies (no CORS headers),
+        but without this it could still forge note writes, deletions, or
+        API-key-burning /chat and /tts calls, and reach us through a
+        domain of its own resolving to 127.0.0.1 (DNS rebinding).
+
+        Raises _RequestError(403). Header-less clients (curl, tests) pass:
+        only browsers attach Origin/Sec-Fetch-Site, and a browser that
+        does attach them must prove same-origin.
+        """
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host not in ALLOWED_HOSTS:
+            raise _RequestError("Unexpected Host header.", 403)
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site and site not in ("same-origin", "none"):
+            raise _RequestError("Cross-site requests are not allowed.", 403)
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin and origin.lower() not in ALLOWED_ORIGINS:
+            raise _RequestError("Cross-origin requests are not allowed.", 403)
+
+    def _guard(self):
+        """_check_origin for the request currently being handled, answering
+        403 itself. Returns False when the request must not go further."""
+        try:
+            self._check_origin()
+        except _RequestError as e:
+            self._send_json({"error": str(e)}, e.status)
+            return False
+        return True
+
     def do_GET(self):
+        if not self._guard():
+            return
         path = self.path.split("?", 1)[0]
         if path == "/runtime":
             self._send_json(runtime_status())
@@ -1262,7 +1334,7 @@ class MoaiHandler(SimpleHTTPRequestHandler):
                     "models": config.get("models", []),
                 })
             except Exception as e:
-                self._send_json({"error": str(e)}, 500)
+                self._send_internal_error(e)
             return
         if path == "/powers":
             try:
@@ -1280,7 +1352,7 @@ class MoaiHandler(SimpleHTTPRequestHandler):
                     "tools": load_json_list(TOOLS_FILE, "tools"),
                 })
             except Exception as e:
-                self._send_json({"error": str(e)}, 500)
+                self._send_internal_error(e)
             return
         if path == "/notes":
             params = dict(urllib.parse.parse_qsl(
@@ -1289,19 +1361,19 @@ class MoaiHandler(SimpleHTTPRequestHandler):
             try:
                 self._send_json({"notes": find_notes(params.get("q", "").strip() or None)})
             except Exception as e:
-                self._send_json({"error": str(e)}, 500)
+                self._send_internal_error(e)
             return
         if path == "/connectors":
             try:
                 self._send_json({"connectors": load_json_list(CONNECTORS_FILE, "connectors")})
             except Exception as e:
-                self._send_json({"error": str(e)}, 500)
+                self._send_internal_error(e)
             return
         if path == "/tools":
             try:
                 self._send_json({"tools": load_json_list(TOOLS_FILE, "tools")})
             except Exception as e:
-                self._send_json({"error": str(e)}, 500)
+                self._send_internal_error(e)
             return
         super().do_GET()
 
@@ -1313,13 +1385,42 @@ class MoaiHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _send_internal_error(self, exc):
+        """Log the real cause, tell the client nothing about it: raw
+        exception text leaks absolute paths and other local details."""
+        print("MoAI internal error: %s" % exc, file=sys.stderr)
+        self._send_json({"error": "Something went wrong on Moai's side. Try again."}, 500)
+
     def _read_body(self, max_bytes=MAX_BODY_CHAT):
-        length = int(self.headers.get("Content-Length", 0))
+        """Parse a JSON object body. The content type is enforced because
+        form/text-plain bodies are exactly what a cross-site request can
+        send without a CORS preflight."""
+        ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if ctype and ctype != "application/json":
+            raise _RequestError("Content-Type must be application/json.", 415)
+        raw_length = (self.headers.get("Content-Length") or "").strip()
+        try:
+            length = int(raw_length) if raw_length else 0
+        except ValueError:
+            raise _RequestError("Invalid Content-Length.", 400)
+        if length < 0:
+            raise _RequestError("Invalid Content-Length.", 400)
         if length > max_bytes:
             raise _RequestError("Request too large.", 413)
-        return json.loads(self.rfile.read(length).decode("utf-8"))
+        body = self.rfile.read(length)
+        if len(body) != length:
+            raise _RequestError("Incomplete request body.", 400)
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            raise _RequestError("Body must be valid JSON.", 400)
+        if not isinstance(data, dict):
+            raise _RequestError("Body must be a JSON object.", 400)
+        return data
 
     def do_POST(self):
+        if not self._guard():
+            return
         try:
             if self.path == "/runtime":
                 data = self._read_body(1024)
@@ -1328,6 +1429,8 @@ class MoaiHandler(SimpleHTTPRequestHandler):
                 data = self._read_body(1024)
                 self._send_json(save_preferences(data.get("lang"), data.get("name")))
             elif self.path == "/dev/execute":
+                if not dev_mode_allowed():
+                    raise _RequestError("Dev mode is not available on this server.", 403)
                 data = self._read_body(MAX_BODY_DEV)
                 result = execute_dev_operation(data.get("operation", ""), data.get("payload", {}))
                 self._send_json({"ok": True, "operation": data.get("operation", ""), "result": result})
@@ -1354,6 +1457,8 @@ class MoaiHandler(SimpleHTTPRequestHandler):
             self._send_json({"error": "Something went wrong on Moai's side. Try again."}, 500)
 
     def do_PUT(self):
+        if not self._guard():
+            return
         try:
             if self.path == "/connectors":
                 self._handle_entity_action(CONNECTORS_FILE, "connectors", "update")
@@ -1370,6 +1475,8 @@ class MoaiHandler(SimpleHTTPRequestHandler):
             self._send_json({"error": "Something went wrong on Moai's side. Try again."}, 500)
 
     def do_DELETE(self):
+        if not self._guard():
+            return
         path = self.path.split("?", 1)[0]
         try:
             if path == "/note":
@@ -1595,6 +1702,8 @@ def main():
     handler = partial(MoaiHandler, directory=VIEWER_DIR)
     server = ThreadingHTTPServer(("127.0.0.1", PORT), handler)
     print("MoAI watching over http://localhost:%d" % PORT)
+    if dev_mode_allowed():
+        print("Dev mode can be enabled from the viewer (%s/--dev is set)" % DEV_MODE_ENV)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

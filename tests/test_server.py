@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 """Offline tests for server.py — no network, no API calls."""
 
+import functools
+import http.client
+import http.server
 import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 import unittest.mock
 
@@ -395,6 +399,120 @@ class TestDevMode(unittest.TestCase):
             with unittest.mock.patch.object(server, "RUNTIME_MODE", "production"):
                 with self.assertRaises(server._RequestError):
                     server.execute_dev_operation("notes.list", {})
+
+
+class _LiveServer:
+    """The real handler on an ephemeral port. Requests are sent with an
+    explicit Host header so they look like they hit the canonical port."""
+
+    def __enter__(self):
+        handler = functools.partial(server.MoaiHandler, directory=server.VIEWER_DIR)
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=5)
+        return False
+
+    def request(self, method, path, body=None, headers=None, host=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            hdrs = {"Host": host or "localhost:%d" % server.PORT}
+            if body is not None:
+                hdrs["Content-Type"] = "application/json"
+            hdrs.update(headers or {})
+            conn.request(method, path, body=body, headers=hdrs)
+            resp = conn.getresponse()
+            return resp.status, resp.read().decode("utf-8")
+        finally:
+            conn.close()
+
+
+class TestOriginGuard(unittest.TestCase):
+    def test_cross_site_state_change_is_rejected(self):
+        with _LiveServer() as s:
+            status, _ = s.request(
+                "POST", "/remember", json.dumps({"text": "pwned"}),
+                {"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"},
+            )
+        self.assertEqual(status, 403)
+
+    def test_unexpected_host_is_rejected(self):
+        with _LiveServer() as s:
+            status, _ = s.request("GET", "/runtime", host="evil.example")
+        self.assertEqual(status, 403)
+
+    def test_same_origin_request_is_allowed(self):
+        with _LiveServer() as s:
+            status, payload = s.request(
+                "GET", "/runtime",
+                headers={"Origin": "http://localhost:%d" % server.PORT,
+                         "Sec-Fetch-Site": "same-origin"},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(payload)["mode"], "production")
+
+    def test_non_json_content_type_is_rejected(self):
+        with _LiveServer() as s:
+            status, _ = s.request(
+                "POST", "/remember", json.dumps({"text": "pwned"}),
+                {"Content-Type": "text/plain;charset=UTF-8"},
+            )
+        self.assertEqual(status, 415)
+
+    def test_malformed_content_length_is_a_client_error(self):
+        with _LiveServer() as s:
+            status, _ = s.request(
+                "POST", "/runtime", b"", {"Content-Length": "-1"},
+            )
+        self.assertEqual(status, 400)
+
+
+class TestDevModeGate(unittest.TestCase):
+    def test_dev_mode_cannot_be_enabled_over_http_by_default(self):
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(server.DEV_MODE_ENV, None)
+            with unittest.mock.patch.object(server.sys, "argv", ["server.py"]):
+                with self.assertRaises(server._RequestError) as ctx:
+                    server.set_runtime_mode("dev")
+        self.assertEqual(ctx.exception.status, 403)
+        self.assertEqual(server.runtime_status()["mode"], "production")
+
+    def test_dev_mode_can_be_enabled_when_armed_at_startup(self):
+        with unittest.mock.patch.dict(os.environ, {server.DEV_MODE_ENV: "1"}):
+            try:
+                self.assertTrue(server.set_runtime_mode("dev")["dev_available"])
+                self.assertEqual(server.runtime_status()["mode"], "dev")
+            finally:
+                server.set_runtime_mode("production")
+
+
+class TestSafeEditablePath(unittest.TestCase):
+    def test_rejects_traversal(self):
+        with self.assertRaises(server._RequestError):
+            server._safe_editable_path("../../etc/passwd.md")
+
+    def test_rejects_non_markdown(self):
+        with self.assertRaises(server._RequestError):
+            server._safe_editable_path("docs/config.json")
+
+    def test_rejects_symlink_escaping_docs(self):
+        with _TempGalaxy() as g:
+            outside = os.path.join(os.path.dirname(g.docs_dir), "outside.md")
+            with open(outside, "w", encoding="utf-8") as f:
+                f.write("# Outside\n")
+            link = os.path.join(g.docs_dir, "link.md")
+            try:
+                os.symlink(outside, link)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable")
+            with self.assertRaises(server._RequestError):
+                server._safe_editable_path("docs/link.md")
 
 
 class TestPreferences(unittest.TestCase):
