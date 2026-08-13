@@ -1601,11 +1601,12 @@ const LOG_KEY = 'moai-log';
 
 function _loadLog() {
   try { return JSON.parse(localStorage.getItem(LOG_KEY) || '[]'); }
-  catch { return []; }
+  catch (e) { console.warn('Discarding an unreadable saved log:', e); return []; }
 }
 function _saveLog(entries) {
+  // non-fatal (private mode, quota): the session keeps working in memory
   try { localStorage.setItem(LOG_KEY, JSON.stringify(entries.slice(-300))); }
-  catch {}
+  catch (e) { console.warn("Couldn't persist the log:", e); }
 }
 function _scrollLogToBottom() {
   const scroll = document.querySelector('#tab-log .panel-scroll');
@@ -1949,6 +1950,7 @@ async function speakElevenLabs(text) {
     });
     const data = await res.json();
     if (!res.ok || data.error || !data.audio_base64) {
+      console.warn('ElevenLabs voice off for 5 min:', data.error || res.status);
       elevenLabsDisabledUntil = Date.now() + 5 * 60 * 1000;
       return null;
     }
@@ -1963,6 +1965,7 @@ async function speakElevenLabs(text) {
     await audio.play();
     return done;
   } catch (e) {
+    console.warn('ElevenLabs voice off for 5 min:', e);
     elevenLabsDisabledUntil = Date.now() + 5 * 60 * 1000;
     return null;
   }
@@ -2060,7 +2063,10 @@ const prefsPromise = fetch('/preferences').then(r => r.json()).then(p => {
   applyPrefsToVoiceAndRec();
   maybeShowLangPrompt();
   return PREFS;
-}).catch(() => PREFS);
+}).catch(e => {
+  console.warn("Couldn't load preferences:", e);
+  return PREFS;
+});
 
 async function savePrefs(lang, name) {
   try {
@@ -2069,8 +2075,12 @@ async function savePrefs(lang, name) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ lang, name })
     });
-    PREFS = await res.json();
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+    PREFS = data;
   } catch (e) {
+    // keep going with the chosen values, but don't pretend they were saved
+    console.warn("Couldn't save preferences:", e);
     PREFS = { lang, name };
   }
   applyPrefsToVoiceAndRec();
@@ -2415,8 +2425,8 @@ async function askMoai() {
       })
     });
     const data = await res.json();
-    if (data.error) {
-      showAnswer(escapeHtml(data.error), true);
+    if (!res.ok || data.error) {
+      showAnswer(escapeHtml(data.error || `Server error ${res.status}.`), true);
       setFaceState('error');
       setTimeout(() => { if (_faceState === 'error') setFaceState('idle'); }, 2500);
       if (conversationMode) setTimeout(startListening, 1200);
@@ -2501,8 +2511,8 @@ async function rememberFlow(text) {
       body: JSON.stringify({ text })
     });
     const data = await res.json();
-    if (data.error) {
-      showAnswer(escapeHtml(data.error), true);
+    if (!res.ok || data.error) {
+      showAnswer(escapeHtml(data.error || `Server error ${res.status}.`), true);
       setFaceState('error');
       setTimeout(() => { if (_faceState === 'error') setFaceState('idle'); }, 2500);
       if (conversationMode) setTimeout(startListening, 1200);

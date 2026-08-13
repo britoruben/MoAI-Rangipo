@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Offline tests for server.py — no network, no API calls."""
 
+import io
 import json
 import os
 import sys
@@ -232,7 +233,7 @@ class _TempGalaxy:
         for p in self._patches:
             p.__enter__()
         # each test starts against its own file, on a fresh graph cache
-        server._graph_cache["mtime"] = None
+        server._graph_cache["stamp"] = None
         server._graph_cache["graph"] = None
         build.build()
         return self
@@ -461,6 +462,179 @@ class TestBuildSystemPrompt(unittest.TestCase):
         prompt = server.build_system_prompt(self.GRAPH, [0], "es", "Alex")
         self.assertNotIn("Ã", prompt)
         self.assertIn("menú", prompt)
+
+
+class TestLoadConfig(unittest.TestCase):
+    def _with_config(self, content):
+        td = tempfile.TemporaryDirectory()
+        path = os.path.join(td.name, "config.json")
+        if content is not None:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+        return td, unittest.mock.patch.object(server, "CONFIG_FILE", path)
+
+    def test_missing_file_raises_actionable_request_error(self):
+        td, patch = self._with_config(None)
+        with td, patch:
+            with self.assertRaises(server._RequestError) as ctx:
+                server.load_config()
+        self.assertEqual(ctx.exception.status, 500)
+        self.assertIn("config.example.json", str(ctx.exception))
+
+    def test_invalid_json_raises_request_error(self):
+        td, patch = self._with_config("{not json")
+        with td, patch:
+            with self.assertRaises(server._RequestError) as ctx:
+                server.load_config()
+        self.assertIn("not valid JSON", str(ctx.exception))
+
+    def test_non_object_root_raises_request_error(self):
+        td, patch = self._with_config("[]")
+        with td, patch:
+            with self.assertRaises(server._RequestError):
+                server.load_config()
+
+    def test_valid_config_is_returned(self):
+        td, patch = self._with_config('{"api_key": "k"}')
+        with td, patch:
+            self.assertEqual(server.load_config(), {"api_key": "k"})
+
+
+class TestLoadGraph(unittest.TestCase):
+    def test_missing_file_raises_build_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "graph-data.js")
+            with unittest.mock.patch.object(server, "GRAPH_FILE", path):
+                server._graph_cache["stamp"] = None
+                with self.assertRaises(server._BuildError):
+                    server.load_graph()
+
+    def test_unparseable_file_raises_build_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "graph-data.js")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("const GRAPH = {broken")
+            with unittest.mock.patch.object(server, "GRAPH_FILE", path):
+                server._graph_cache["stamp"] = None
+                with self.assertRaises(server._BuildError) as ctx:
+                    server.load_graph()
+        self.assertIn("build.py", str(ctx.exception))
+
+    def test_rebuild_in_same_timestamp_tick_is_not_served_from_cache(self):
+        with _TempGalaxy() as g:
+            g.write_note("alpha.md", "# Alpha\nContent.")
+            build.build()
+            self.assertEqual(len(server.load_graph()["nodes"]), 1)
+            os.remove(os.path.join(g.docs_dir, "alpha.md"))
+            server._rebuild_galaxy()
+            self.assertEqual(server.load_graph()["nodes"], [])
+
+
+class TestRebuildGalaxy(unittest.TestCase):
+    def test_build_failure_becomes_build_error_with_cause(self):
+        boom = OSError("disk on fire")
+        with unittest.mock.patch.object(build, "build", side_effect=boom):
+            with self.assertRaises(server._BuildError) as ctx:
+                server._rebuild_galaxy()
+        self.assertIs(ctx.exception.__cause__, boom)
+        self.assertIsNone(server._graph_cache["stamp"])
+
+    def test_build_error_is_a_runtime_error(self):
+        # existing callers catch RuntimeError; they must keep working
+        self.assertTrue(issubclass(server._BuildError, RuntimeError))
+        self.assertTrue(issubclass(server._UpstreamError, RuntimeError))
+
+
+class _StubHandler(server.MoaiHandler):
+    """MoaiHandler without a socket: enough of it to exercise _read_body and
+    _guard, which are where request-level errors are turned into responses."""
+
+    def __init__(self, body=b"", headers=None, command="POST", path="/test"):
+        self.rfile = io.BytesIO(body)
+        self.headers = headers if headers is not None else {
+            "Content-Length": str(len(body))
+        }
+        self.command = command
+        self.path = path
+        self.sent = []
+
+    def _send_json(self, obj, status=200):
+        self.sent.append((status, obj))
+
+    def log_message(self, *a):
+        pass
+
+
+class TestReadBody(unittest.TestCase):
+    def test_parses_json_object(self):
+        self.assertEqual(_StubHandler(b'{"a": 1}')._read_body(), {"a": 1})
+
+    def test_invalid_json_is_400(self):
+        with self.assertRaises(server._RequestError) as ctx:
+            _StubHandler(b"{nope")._read_body()
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_non_object_body_is_400(self):
+        with self.assertRaises(server._RequestError) as ctx:
+            _StubHandler(b"[1, 2]")._read_body()
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_invalid_utf8_is_400(self):
+        with self.assertRaises(server._RequestError) as ctx:
+            _StubHandler(b"\xff\xfe")._read_body()
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_bad_content_length_is_400(self):
+        handler = _StubHandler(b"{}", headers={"Content-Length": "abc"})
+        with self.assertRaises(server._RequestError) as ctx:
+            handler._read_body()
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_oversized_body_is_413(self):
+        with self.assertRaises(server._RequestError) as ctx:
+            _StubHandler(b'{"a": 1}')._read_body(max_bytes=2)
+        self.assertEqual(ctx.exception.status, 413)
+
+
+class TestGuard(unittest.TestCase):
+    def _status_for(self, exc):
+        handler = _StubHandler()
+
+        def route():
+            raise exc
+
+        with unittest.mock.patch.object(server, "log_exception"):
+            handler._guard(route)
+        self.assertEqual(len(handler.sent), 1)
+        return handler.sent[0]
+
+    def test_request_error_keeps_its_status(self):
+        status, body = self._status_for(server._RequestError("nope", 404))
+        self.assertEqual(status, 404)
+        self.assertEqual(body, {"error": "nope"})
+
+    def test_upstream_error_is_502(self):
+        status, _ = self._status_for(server._UpstreamError("api down"))
+        self.assertEqual(status, 502)
+
+    def test_build_error_is_500(self):
+        status, _ = self._status_for(server._BuildError("no galaxy"))
+        self.assertEqual(status, 500)
+
+    def test_domain_runtime_error_is_409(self):
+        status, body = self._status_for(RuntimeError("no note matches 'x'"))
+        self.assertEqual(status, 409)
+        self.assertEqual(body, {"error": "no note matches 'x'"})
+
+    def test_unexpected_error_is_a_generic_500(self):
+        status, body = self._status_for(KeyError("nodes"))
+        self.assertEqual(status, 500)
+        self.assertNotIn("nodes", body["error"])
+
+    def test_successful_route_is_left_alone(self):
+        handler = _StubHandler()
+        handler._guard(lambda: handler._send_json({"ok": True}))
+        self.assertEqual(handler.sent, [(200, {"ok": True})])
 
 
 if __name__ == "__main__":
