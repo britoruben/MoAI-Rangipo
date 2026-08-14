@@ -38,3 +38,6 @@ CLAUDE.md
 
 # Old prototypes, unreferenced by current code — kept locally, not published.
 images/_archive/
+
+# Scratch/local-only working files (audits, prompts) — not part of the repo.
+docs/tmp/

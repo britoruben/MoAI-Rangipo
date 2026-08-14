@@ -11,7 +11,10 @@ Your notes, connectors, and tools become a navigable 3D knowledge galaxy. Ask it
 ```bash
 py -3 build.py    # generates/updates viewer/graph-data.js
 py -3 server.py    # starts at http://localhost:4700
+py -3 server.py --dev    # same, but the Dev console (local file operations) can be enabled
 ```
+
+Dev mode is off-limits unless the server was started for it (`--dev`, or `MOAI_DEV=1`): otherwise nothing can turn it on over HTTP.
 
 Open Chrome at `http://localhost:4700`. Paste your Anthropic API key into `config.json` (never in the chat).
 
