@@ -131,13 +131,17 @@ sequenceDiagram
 
 ## 5. Critical rules and non-obvious decisions
 
-- **`id == index` in `GRAPH.nodes`.** Explicit design decision since Phase 1: "future features depend on looking up nodes by index." Direct consequence: `build.py` **reassigns ALL ids on every run** (alphabetical order within each folder, made deterministic with `dirnames.sort()`), so a `/remember` call can shift the ids of notes that already existed, not just append one at the end. The `mtime` field in `GRAPH` (and `graph_mtime` in the `/chat` response) exist precisely so the viewer can detect when its copy went stale and avoid flying to the wrong star — but it doesn't fix it by itself: if you see the "outdated galaxy" warning, reload the page.
+- **`id == index` in `GRAPH.nodes`.** Explicit design decision since Phase 1: "future features depend on looking up nodes by index." Direct consequence: `build.py` **reassigns ALL ids on every run** (alphabetical order within each folder, made deterministic with `dirnames.sort()`), so a `/remember` call can shift the ids of notes that already existed, not just append one at the end. The `mtime` field in `GRAPH` (and `graph_mtime` in the `/chat` response) exist precisely so the viewer can detect when its copy went stale and avoid flying to the wrong star. It now self-heals instead of asking for a reload — see "Live graph refresh" in §9.
 - **`py -3`, not `python`.** On Matatoa's machine, plain `python` points to the Microsoft Store alias.
 - **esm.sh, not unpkg.** The `.mjs` bundle from unpkg for `3d-force-graph` doesn't bundle its dependencies (`three`); esm.sh does resolve them via `?deps=`. The `three` version imported in the module and the one in `?deps=` must match exactly, or the graph and sprites won't share the same instance.
 - **Locks in `server.py`.** It's a `ThreadingHTTPServer`: it handles requests in parallel. `_build_lock` serializes note writes + graph rebuilds. `_session_locks` (one per `session_id`) serializes the history of a single conversation, so that two near-simultaneous questions don't break the `user`/`assistant` alternation required by the Messages API.
 - **Atomic write.** `build.py` writes to a `.tmp` file and does `os.replace()` at the end — nobody ever reads a half-written `graph-data.js`.
 - **The API key never reaches the browser.** It lives only in `config.json` (root, outside `viewer/`, in `.gitignore`). The server serves EXCLUSIVELY the `viewer/` folder — requesting `/config.json` from the browser gets a 404.
-- **Graceful degradation on corrupt JSON.** `load_json_list()` (server.py) and `collect_json_nodes()` (build.py) return an empty list on a missing file, invalid JSON, or an unexpected root/list shape — they never raise an uncaught exception. This matters especially in `build.py`, because `/remember` calls `build.build()` and, if it failed, the note just written would be deleted as a rollback.
+- **Graceful degradation on corrupt/unreadable files.** `load_json_list()` (server.py), `collect_json_nodes()` (build.py, `connectors.json`/`tools.json`), and `collect_md_nodes()` (build.py, individual `.md` notes) all skip the offending file with a `log_warning` instead of raising — a single bad-encoding note or malformed JSON file must not take the whole galaxy down. This matters especially in `build.py`, because `/remember` calls `build.build()` and, if it failed outright, the note just written would be deleted as a rollback.
+- **Every response goes through `_guard(route)`.** `_RequestError` carries its own status, an upstream API failure (Anthropic/ElevenLabs) is a 502, a failed galaxy rebuild is a 500, a domain `RuntimeError` ("no note matches...") is a 409, and anything unexpected is a logged, generic 500 — nothing is ever answered with 200 for a request that didn't succeed.
+- **Origin/DNS-rebinding guard.** `_enforce_origin()` runs first in every `do_*` (including `do_HEAD` and static-file GETs, not just the JSON routes): the `Host` header must be one of `ALLOWED_HOSTS`, and any `Origin`/`Sec-Fetch-Site` a browser sends must be same-origin. Header-less clients (curl, tests) pass — only a browser attaches those headers, and a browser that does must prove same-origin. This is what stops an attacker page (or a domain of its own resolving to `127.0.0.1`) from forging note writes, deletions, or API-key-spending `/chat`/`/tts` calls.
+- **Dev mode can't be armed remotely.** `dev_mode_allowed()` gates both `set_runtime_mode("dev")` and `/dev/execute` on the server having been started with `MOAI_DEV=1` or `--dev` — an HTTP request alone can never turn Dev mode on, since `/dev/execute` reads and writes local files.
+- **One-slot undo for note deletion.** `_last_deleted` (module-level, `{path, content}`) is filled by `_stash_and_remove()`, which every deletion entry point uses instead of a bare `os.remove()` — the `delete_note` chat tool, the Dev console's `notes.delete`, and the plain `DELETE /note` endpoint all share it. `undo_last_delete()` (chat tool `undo_delete`, voice-triggerable: "undo that" / "deshaz eso") restores it. Only the single most recent deletion is recoverable — a second delete before the first is undone overwrites the slot and the first is gone for good. This is a safety net for a misheard voice command, not a trash can.
 
 ---
 
@@ -145,9 +149,9 @@ sequenceDiagram
 
 Things found during audits and left as-is on purpose — don't rediscover them as if they were new:
 
-- **Id drift across tabs.** If you have two tabs open and one does `/remember`, the other is left with potentially shifted ids until reloaded. `graph_mtime` prevents this from moving the camera to the wrong star, but it doesn't fix it by itself. Fixing it at the root would mean abandoning the "id == index" rule — an explicit design decision, not an oversight.
-- **`_sessions` grows without bound** (in-memory chat history, never purged by age). Low impact: local use, single user.
-- **`_read_body` doesn't cap `Content-Length` size.** Mitigated by the server only listening on `127.0.0.1`.
+- **Id drift across tabs.** If you have two tabs open and one does `/remember`, the other is left with potentially shifted ids until it self-heals (its next `/chat` call detects the mismatch and refetches — see "Live graph refresh" in §9) or until `↻ Refresh`/a reload is used manually; an idle tab with no interaction won't refresh on its own. `graph_mtime` is what makes this detectable at all, preventing a stale id from moving the camera to the wrong star in the meantime. Fixing the drift itself at the root would mean abandoning the "id == index" rule — an explicit design decision, not an oversight.
+- ~~`_sessions` grows without bound~~ **Fixed**: capped at `MAX_SESSIONS` (200) — a new session past the cap evicts whichever existing session was least recently accessed (`_session_times`), not insertion order.
+- ~~`_read_body` doesn't cap `Content-Length` size~~ **Fixed**: `_read_body(max_bytes=...)` rejects an oversized body with 413 before reading it (per-route caps: `MAX_BODY_CHAT`, `MAX_BODY_REMEMBER`, `MAX_BODY_EDIT`, `MAX_BODY_ENTITY`, `MAX_BODY_TTS`, `MAX_BODY_DEV`).
 
 ---
 
@@ -186,6 +190,12 @@ moai/
 │   ├── graph-data.js            # generated — DO NOT edit by hand
 │   └── images/                  # the only images/ folder actually served
 └── tests/                       # offline unit tests, no network/API calls
+    ├── galaxy.py                 # shared TempGalaxy fixture (not a test file itself)
+    ├── test_build.py
+    ├── test_server.py
+    ├── test_server_api.py        # model resolution, Anthropic request/tool-use loop, ElevenLabs proxy
+    ├── test_server_helpers.py    # path guards, config loading, note writing, graph cache, Dev whitelist
+    └── test_server_http.py       # every HTTP endpoint against a real ThreadingHTTPServer
 ```
 
 ---
@@ -266,30 +276,28 @@ Auto-selects a voice matching the language preference — for Spanish it scores 
 
 ### Legend type filter
 
-`#legend` in bottom-left corner. Each item has `data-type` attribute and `cursor: pointer`.
-`toggleTypeFilter(type, color)`:
-- First click: scales matching nodes ×1.6, dims others to 0.3 opacity, zooms toward centroid (min distance 150 to avoid extreme zoom on single nodes like "Projects").
-- Same click again: deselects, restores original scales, zooms out with `Graph.zoomToFit(1600, 90)`.
-- `originalNodeScales` Map preserves the baseline scales before filtering.
-- `currentTypeFilter` tracks the active filter (only one at a time — multi-filter is deferred).
+`#legend` in bottom-left corner, one item per type present in `DATA.nodes`, rebuilt by `refreshLegend()` on every graph swap. **Multi-select**: `activeTypeFilters` is a `Set`, not a single value — `toggleTypeFilter(type)` adds/removes `type` from it, so several types can be active at once (an empty set means "show everything"). `applyHighlight()` reads the set to decide per-node opacity/scale (`×1.35` for a match when filtering) and per-link opacity (touching a filtered type highlights the link), and zooms to fit whatever's currently selected (`Graph.zoomToFit(900, 700, node => activeTypeFilters.has(node.type))`, or the whole galaxy when the set is empty).
+
+Each legend `<div>` is keyboard-accessible: `tabindex="0"`, `role="button"`, `aria-pressed` reflecting membership in `activeTypeFilters`, `aria-label`, a `:focus-visible` outline, and a `keydown` handler treating Enter/Space the same as a click. This was a real gap (plain clickable `<div>`s are invisible to keyboard/screen-reader users) — the same fix was later applied to the Navigator's Log's clickable stars (`.log-star`) and the powers panel's action items (`.power-item.clickable`); if you add another custom clickable element, follow the same pattern rather than reaching for a native `<button>` only sometimes.
 
 ### Chat bar
 
 - `<textarea id="question">` (auto-grow via `autoGrowQuestion()` on `input` event, max-height 120px).
 - `Enter` submits; `Shift+Enter` inserts newline.
 - Successful answers go to the **Log panel** (right side panel), NOT the floating answer box.
-- Floating `#answer-box` is reserved for errors and "outdated galaxy" warnings only.
+- Floating `#answer-box` is reserved for errors only — a stale galaxy self-heals silently instead of showing a warning there (see "Live graph refresh" below).
 - Log auto-opens on the first message (`logAutoOpened` flag, one-time only).
+- `#new-chat-toggle` (header, next to Log/Refresh) resets `sessionId` (a new `crypto.randomUUID()`, persisted to `sessionStorage`) so the next `/chat` call carries no prior turns as context. It does **not** touch the Navigator's Log — that's a separate, deliberately durable transcript, not API conversation state. Purely client-side; no server endpoint involved.
 
 ### Navigator's Log
 
-`localStorage` key `moai-log`, max 300 entries. Each entry: `{ts, type, question, answer, nodes, sources}`. Stars in the log are clickable (fly to node). Sources are filtered for `https?://` before rendering.
+`localStorage` key `moai-log`, max 300 entries. Each entry: `{ts, type, question, answer, nodes, sources}`. Stars in the log (`.log-star`) are clickable — and keyboard-accessible (Tab + Enter/Space, see "Legend type filter" above for why) — to fly to the node. Sources are filtered for `https?://` before rendering.
 
 ### 3D galaxy
 
 `3d-force-graph` loaded from `esm.sh`. Key imports:
 ```js
-import ForceGraph3D from 'https://esm.sh/3d-force-graph@1.73.3?deps=three@0.180.0'
+import ForceGraph3D from 'https://esm.sh/3d-force-graph@1.77.0?deps=three@0.180.0'
 import * as THREE   from 'https://esm.sh/three@0.180.0'
 import { UnrealBloomPass } from 'https://esm.sh/three@0.180.0/examples/jsm/postprocessing/UnrealBloomPass.js?deps=three@0.180.0'
 ```
@@ -305,10 +313,48 @@ Handled client-side in `handleSlashCommand()`:
 | Command | Action |
 |---|---|
 | `/remember <text>` | Opens save flow, calls `POST /remember` |
-| `/remember-edit <title>` | Opens edit flow |
+| `/edit-note <title>` / `/remember-edit <title>` | Opens edit flow (both are aliases for the same handler) |
+| `/delete-note <title>` | Opens delete flow, calls `DELETE /note` |
 | `/list-notes [q]` | Lists notes (optional search) |
 | `/list-connectors` | Lists connectors |
 | `/list-tools` | Lists tools |
-| `/web-search <query>` | Falls through to `/chat` (server triggers web_search tool) |
+| `/web-search <query>` | Not handled by `handleSlashCommand()` itself — falls through as a normal question, and the system prompt instructs the model to always use the web_search tool when a message starts with this prefix |
 
 Command menu (`#slash-menu`) appears when the user types `/` in the textarea.
+
+### Live graph refresh
+
+`refreshGraphData(newGraph)` is the single shared function every "the server
+sent back a fresh graph" path goes through: it preserves each existing
+node's `(x, y, z)` position (matched by `nodeKey(n)`, i.e. `n.path`, or a
+`'#' + label` fallback for connector/tool nodes — which have no `path` and
+would otherwise all collide on the same `undefined` key) so the galaxy
+doesn't visibly jump or reset, then swaps `DATA`, recomputes `neighbors`,
+clears focus/highlight state, calls `Graph.graphData(DATA)`, and
+`refreshLegend()`. `liveAddNode(data)` (used by `/remember` and by the
+`save_note` chat tool) calls it first, then does the extra "new star is
+born next to its most related node" positioning and the birth-pulse camera
+flight — those two are the only callers that have a specific new node to
+animate.
+
+**Real incident:** `askMoai()`'s `/chat` response handler used to gate the
+refresh on `if (data.new_id != null && data.graph)`. `new_id` is only ever
+set by the `save_note` tool (`server.py`'s `_handle_chat` — see §3) — so
+when the model called `delete_note`, `manage_connector`, or `manage_tool`
+instead, the server correctly sent back `data.graph` (detected via mtime,
+same §3), but the client silently ignored it. The galaxy looked stale
+after any delete or connector/tool edit done through chat, with no error
+anywhere — indistinguishable from a real bug in the mutation itself unless
+you knew to check the client-side gate. Fixed: refresh whenever `data.graph`
+is present; only additionally call `liveAddNode`'s new-node logic when
+`data.new_id != null`. **If you add another mutating tool, make sure its
+server-side handler still funnels through the same mtime-based `data.graph`
+detection in `_handle_chat`, and don't reintroduce a `new_id`-only gate on
+the client.**
+
+`#refresh-toggle` (header) is the manual fallback: `GET /graph` (thin
+wrapper around `load_graph()`, mtime-cached) followed by
+`refreshGraphData()`. It exists because no auto-refresh path can cover
+every case — edits made outside the app (a text editor, `build.py` run by
+hand), another open tab's changes, or the Dev console's local operations
+(`/dev/execute`) none of which push anything to already-open viewer tabs.

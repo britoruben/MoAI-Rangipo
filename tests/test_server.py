@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Offline tests for server.py — no network, no API calls."""
 
+import io
 import json
 import os
 import sys
@@ -11,6 +12,7 @@ import unittest.mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import build
 import server
+from tests.galaxy import TempGalaxy as _TempGalaxy
 
 
 class TestNormalize(unittest.TestCase):
@@ -174,75 +176,6 @@ class TestTitleFrom(unittest.TestCase):
         self.assertEqual(result, "Recuerdo")
 
 
-class _TempGalaxy:
-    """Context manager: a temp repo (docs/, connectors.json, tools.json,
-    graph-data.js) with server.py and build.py's module-level path
-    constants patched to point at it. Used to test the CRUD helpers
-    (find_notes, delete_note_by_title, manage_entity) against real files
-    without touching the actual project data."""
-
-    def __init__(self):
-        self._td = tempfile.TemporaryDirectory()
-        self.root = self._td.name
-        self.docs_dir = os.path.join(self.root, "docs")
-        self.captures_dir = os.path.join(self.docs_dir, "captures")
-        self.ideas_dir = os.path.join(self.docs_dir, "ideas")
-        self.projects_dir = os.path.join(self.docs_dir, "projects")
-        for d in (self.docs_dir, self.captures_dir, self.ideas_dir, self.projects_dir):
-            os.makedirs(d, exist_ok=True)
-        self.connectors_file = os.path.join(self.root, "connectors.json")
-        self.tools_file = os.path.join(self.root, "tools.json")
-        self.graph_file = os.path.join(self.root, "graph-data.js")
-        with open(self.connectors_file, "w", encoding="utf-8") as f:
-            json.dump({"connectors": []}, f)
-        with open(self.tools_file, "w", encoding="utf-8") as f:
-            json.dump({"tools": []}, f)
-
-    def write_note(self, rel_path, content):
-        abs_path = os.path.join(self.docs_dir, rel_path)
-        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-        with open(abs_path, "w", encoding="utf-8") as f:
-            f.write(content)
-
-    def patch(self):
-        build_patch = unittest.mock.patch.multiple(
-            build,
-            ROOT=self.root,
-            DOCS_DIR=self.docs_dir,
-            DOCS_IDEAS_DIR=self.ideas_dir,
-            DOCS_PROJECTS_DIR=self.projects_dir,
-            CONNECTORS_FILE=self.connectors_file,
-            TOOLS_FILE=self.tools_file,
-            OUT_FILE=self.graph_file,
-        )
-        server_patch = unittest.mock.patch.multiple(
-            server,
-            ROOT=self.root,
-            DOCS_DIR=self.docs_dir,
-            CAPTURES_DIR=self.captures_dir,
-            GRAPH_FILE=self.graph_file,
-            CONNECTORS_FILE=self.connectors_file,
-            TOOLS_FILE=self.tools_file,
-        )
-        return build_patch, server_patch
-
-    def __enter__(self):
-        self._td.__enter__()
-        self._patches = self.patch()
-        for p in self._patches:
-            p.__enter__()
-        # each test starts against its own file, on a fresh graph cache
-        server._graph_cache["mtime"] = None
-        server._graph_cache["graph"] = None
-        build.build()
-        return self
-
-    def __exit__(self, *a):
-        for p in reversed(self._patches):
-            p.__exit__(*a)
-        return self._td.__exit__(*a)
-
-
 class TestFindNotes(unittest.TestCase):
     def test_lists_everything_with_no_query(self):
         with _TempGalaxy() as g:
@@ -309,6 +242,80 @@ class TestDeleteNoteByTitle(unittest.TestCase):
                 server.delete_note_by_title("")
 
 
+class TestUndoDelete(unittest.TestCase):
+    def test_undo_restores_the_deleted_note_verbatim(self):
+        with _TempGalaxy() as g:
+            g.write_note("alpha.md", "# Alpha volcano\nOriginal content.")
+            build.build()
+            server.delete_note_by_title("Alpha volcano")
+            self.assertFalse(os.path.isfile(os.path.join(g.docs_dir, "alpha.md")))
+
+            result = server.undo_last_delete()
+
+            self.assertEqual(result["path"], "docs/alpha.md")
+            self.assertIsNotNone(result["node_id"])
+            with open(os.path.join(g.docs_dir, "alpha.md"), encoding="utf-8") as f:
+                self.assertEqual(f.read(), "# Alpha volcano\nOriginal content.")
+            self.assertEqual(
+                [n["label"] for n in server.find_notes(None)], ["Alpha volcano"]
+            )
+
+    def test_undo_with_nothing_to_undo_raises(self):
+        with _TempGalaxy():
+            with self.assertRaises(RuntimeError) as ctx:
+                server.undo_last_delete()
+        self.assertIn("Nothing to undo", str(ctx.exception))
+
+    def test_undo_slot_is_consumed_after_use(self):
+        with _TempGalaxy() as g:
+            g.write_note("alpha.md", "# Alpha\nContent.")
+            build.build()
+            server.delete_note_by_title("Alpha")
+            server.undo_last_delete()
+            with self.assertRaises(RuntimeError) as ctx:
+                server.undo_last_delete()
+        self.assertIn("Nothing to undo", str(ctx.exception))
+
+    def test_only_the_most_recent_delete_is_recoverable(self):
+        with _TempGalaxy() as g:
+            g.write_note("alpha.md", "# Alpha\nFirst.")
+            g.write_note("beta.md", "# Beta\nSecond.")
+            build.build()
+            server.delete_note_by_title("Alpha")
+            server.delete_note_by_title("Beta")  # overwrites the undo slot
+
+            result = server.undo_last_delete()
+
+            self.assertEqual(result["path"], "docs/beta.md")
+            self.assertFalse(os.path.isfile(os.path.join(g.docs_dir, "alpha.md")))
+            self.assertTrue(os.path.isfile(os.path.join(g.docs_dir, "beta.md")))
+            with self.assertRaises(RuntimeError):
+                server.undo_last_delete()  # alpha is gone for good
+
+    def test_undo_refuses_to_overwrite_a_note_recreated_at_the_same_path(self):
+        with _TempGalaxy() as g:
+            g.write_note("alpha.md", "# Alpha\nOriginal.")
+            build.build()
+            server.delete_note_by_title("Alpha")
+            g.write_note("alpha.md", "# Alpha\nA brand new note, same filename.")
+            build.build()
+
+            with self.assertRaises(RuntimeError) as ctx:
+                server.undo_last_delete()
+        self.assertIn("already exists", str(ctx.exception))
+
+    def test_undo_works_across_every_deletion_entry_point(self):
+        # delete_note_by_path (Dev console / update_note_by_path's sibling)
+        # and the plain DELETE /note handler share the same undo buffer via
+        # _stash_and_remove — not just the delete_note chat tool.
+        with _TempGalaxy() as g:
+            g.write_note("alpha.md", "# Alpha\nContent.")
+            build.build()
+            server.delete_note_by_path("docs/alpha.md")
+            result = server.undo_last_delete()
+        self.assertEqual(result["path"], "docs/alpha.md")
+
+
 class TestManageEntity(unittest.TestCase):
     def test_create_then_appears_in_items(self):
         with _TempGalaxy() as g:
@@ -368,7 +375,8 @@ class TestDevMode(unittest.TestCase):
         with _TempGalaxy() as g:
             g.write_note("alpha.md", "# Alpha\nOriginal.")
             build.build()
-            with unittest.mock.patch.object(server, "RUNTIME_MODE", "dev"):
+            with unittest.mock.patch.object(server, "RUNTIME_MODE", "dev"), \
+                 unittest.mock.patch.object(server, "dev_mode_allowed", return_value=True):
                 listed = server.execute_dev_operation("notes.list", {})
                 self.assertEqual([n["label"] for n in listed["items"]], ["Alpha"])
 
@@ -389,10 +397,12 @@ class TestDevMode(unittest.TestCase):
         with _TempGalaxy() as g:
             g.write_note("alpha.md", "# Alpha\nOriginal.")
             build.build()
-            with unittest.mock.patch.object(server, "RUNTIME_MODE", "dev"):
+            with unittest.mock.patch.object(server, "RUNTIME_MODE", "dev"), \
+                 unittest.mock.patch.object(server, "dev_mode_allowed", return_value=True):
                 server.execute_dev_operation("notes.delete", {"path": "docs/alpha.md"})
                 self.assertFalse(os.path.exists(os.path.join(g.docs_dir, "alpha.md")))
-            with unittest.mock.patch.object(server, "RUNTIME_MODE", "production"):
+            with unittest.mock.patch.object(server, "RUNTIME_MODE", "production"), \
+                 unittest.mock.patch.object(server, "dev_mode_allowed", return_value=True):
                 with self.assertRaises(server._RequestError):
                     server.execute_dev_operation("notes.list", {})
 
@@ -461,6 +471,308 @@ class TestBuildSystemPrompt(unittest.TestCase):
         prompt = server.build_system_prompt(self.GRAPH, [0], "es", "Alex")
         self.assertNotIn("Ã", prompt)
         self.assertIn("menú", prompt)
+
+
+class TestLoadConfig(unittest.TestCase):
+    def _with_config(self, content):
+        td = tempfile.TemporaryDirectory()
+        path = os.path.join(td.name, "config.json")
+        if content is not None:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+        return td, unittest.mock.patch.object(server, "CONFIG_FILE", path)
+
+    def test_missing_file_raises_actionable_request_error(self):
+        td, patch = self._with_config(None)
+        with td, patch:
+            with self.assertRaises(server._RequestError) as ctx:
+                server.load_config()
+        self.assertEqual(ctx.exception.status, 500)
+        self.assertIn("config.example.json", str(ctx.exception))
+
+    def test_invalid_json_raises_request_error(self):
+        td, patch = self._with_config("{not json")
+        with td, patch:
+            with self.assertRaises(server._RequestError) as ctx:
+                server.load_config()
+        self.assertIn("not valid JSON", str(ctx.exception))
+
+    def test_non_object_root_raises_request_error(self):
+        td, patch = self._with_config("[]")
+        with td, patch:
+            with self.assertRaises(server._RequestError):
+                server.load_config()
+
+    def test_valid_config_is_returned(self):
+        td, patch = self._with_config('{"api_key": "k"}')
+        with td, patch:
+            self.assertEqual(server.load_config(), {"api_key": "k"})
+
+
+class TestLoadGraph(unittest.TestCase):
+    def test_missing_file_raises_build_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "graph-data.js")
+            with unittest.mock.patch.object(server, "GRAPH_FILE", path):
+                server._graph_cache["stamp"] = None
+                with self.assertRaises(server._BuildError):
+                    server.load_graph()
+
+    def test_unparseable_file_raises_build_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "graph-data.js")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("const GRAPH = {broken")
+            with unittest.mock.patch.object(server, "GRAPH_FILE", path):
+                server._graph_cache["stamp"] = None
+                with self.assertRaises(server._BuildError) as ctx:
+                    server.load_graph()
+        self.assertIn("build.py", str(ctx.exception))
+
+    def test_rebuild_in_same_timestamp_tick_is_not_served_from_cache(self):
+        with _TempGalaxy() as g:
+            g.write_note("alpha.md", "# Alpha\nContent.")
+            build.build()
+            self.assertEqual(len(server.load_graph()["nodes"]), 1)
+            os.remove(os.path.join(g.docs_dir, "alpha.md"))
+            server._rebuild_galaxy()
+            self.assertEqual(server.load_graph()["nodes"], [])
+
+
+class TestRebuildGalaxy(unittest.TestCase):
+    def test_build_failure_becomes_build_error_with_cause(self):
+        boom = OSError("disk on fire")
+        with unittest.mock.patch.object(build, "build", side_effect=boom):
+            with self.assertRaises(server._BuildError) as ctx:
+                server._rebuild_galaxy()
+        self.assertIs(ctx.exception.__cause__, boom)
+        self.assertIsNone(server._graph_cache["stamp"])
+
+    def test_build_error_is_a_runtime_error(self):
+        # existing callers catch RuntimeError; they must keep working
+        self.assertTrue(issubclass(server._BuildError, RuntimeError))
+        self.assertTrue(issubclass(server._UpstreamError, RuntimeError))
+
+
+class _StubHandler(server.MoaiHandler):
+    """MoaiHandler without a socket: enough of it to exercise _read_body,
+    _guard, and _check_origin, which are where request-level errors are
+    turned into responses."""
+
+    def __init__(self, body=b"", headers=None, command="POST", path="/test"):
+        self.rfile = io.BytesIO(body)
+        self.headers = headers if headers is not None else {
+            "Content-Length": str(len(body)),
+            "Host": "127.0.0.1:%d" % server.PORT,
+        }
+        self.command = command
+        self.path = path
+        self.sent = []
+        # _check_origin derives its allowlist from the bound port
+        self.server = unittest.mock.Mock(server_address=("127.0.0.1", server.PORT))
+
+    def _send_json(self, obj, status=200):
+        self.sent.append((status, obj))
+
+    def log_message(self, *a):
+        pass
+
+
+class TestReadBody(unittest.TestCase):
+    def test_parses_json_object(self):
+        self.assertEqual(_StubHandler(b'{"a": 1}')._read_body(), {"a": 1})
+
+    def test_invalid_json_is_400(self):
+        with self.assertRaises(server._RequestError) as ctx:
+            _StubHandler(b"{nope")._read_body()
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_non_object_body_is_400(self):
+        with self.assertRaises(server._RequestError) as ctx:
+            _StubHandler(b"[1, 2]")._read_body()
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_invalid_utf8_is_400(self):
+        with self.assertRaises(server._RequestError) as ctx:
+            _StubHandler(b"\xff\xfe")._read_body()
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_bad_content_length_is_400(self):
+        handler = _StubHandler(b"{}", headers={"Content-Length": "abc"})
+        with self.assertRaises(server._RequestError) as ctx:
+            handler._read_body()
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_oversized_body_is_413(self):
+        with self.assertRaises(server._RequestError) as ctx:
+            _StubHandler(b'{"a": 1}')._read_body(max_bytes=2)
+        self.assertEqual(ctx.exception.status, 413)
+
+    def test_wrong_content_type_is_415(self):
+        handler = _StubHandler(b'{"a": 1}', headers={
+            "Content-Length": "8", "Content-Type": "text/plain",
+        })
+        with self.assertRaises(server._RequestError) as ctx:
+            handler._read_body()
+        self.assertEqual(ctx.exception.status, 415)
+
+    def test_json_content_type_is_accepted(self):
+        handler = _StubHandler(b'{"a": 1}', headers={
+            "Content-Length": "8", "Content-Type": "application/json; charset=utf-8",
+        })
+        self.assertEqual(handler._read_body(), {"a": 1})
+
+    def test_no_content_type_is_accepted(self):
+        # curl and same-origin fetch() without an explicit header both omit it
+        self.assertEqual(_StubHandler(b'{"a": 1}')._read_body(), {"a": 1})
+
+
+class TestGuard(unittest.TestCase):
+    def _status_for(self, exc):
+        handler = _StubHandler()
+
+        def route():
+            raise exc
+
+        with unittest.mock.patch.object(server, "log_exception"):
+            handler._guard(route)
+        self.assertEqual(len(handler.sent), 1)
+        return handler.sent[0]
+
+    def test_request_error_keeps_its_status(self):
+        status, body = self._status_for(server._RequestError("nope", 404))
+        self.assertEqual(status, 404)
+        self.assertEqual(body, {"error": "nope"})
+
+    def test_upstream_error_is_502(self):
+        status, _ = self._status_for(server._UpstreamError("api down"))
+        self.assertEqual(status, 502)
+
+    def test_build_error_is_500(self):
+        status, _ = self._status_for(server._BuildError("no galaxy"))
+        self.assertEqual(status, 500)
+
+    def test_domain_runtime_error_is_409(self):
+        status, body = self._status_for(RuntimeError("no note matches 'x'"))
+        self.assertEqual(status, 409)
+        self.assertEqual(body, {"error": "no note matches 'x'"})
+
+    def test_unexpected_error_is_a_generic_500(self):
+        status, body = self._status_for(KeyError("nodes"))
+        self.assertEqual(status, 500)
+        self.assertNotIn("nodes", body["error"])
+
+    def test_successful_route_is_left_alone(self):
+        handler = _StubHandler()
+        handler._guard(lambda: handler._send_json({"ok": True}))
+        self.assertEqual(handler.sent, [(200, {"ok": True})])
+
+
+class TestCheckOrigin(unittest.TestCase):
+    """_check_origin / _enforce_origin: the DNS-rebinding and cross-site
+    guard that runs first in every do_* (see ARCHITECTURE.md §5)."""
+
+    def test_legitimate_localhost_host_passes(self):
+        handler = _StubHandler(headers={"Host": "localhost:%d" % server.PORT})
+        handler._check_origin()  # must not raise
+
+    def test_legitimate_127_0_0_1_host_passes(self):
+        handler = _StubHandler(headers={"Host": "127.0.0.1:%d" % server.PORT})
+        handler._check_origin()  # must not raise
+
+    def test_forged_host_is_403(self):
+        handler = _StubHandler(headers={"Host": "evil.example:%d" % server.PORT})
+        with self.assertRaises(server._RequestError) as ctx:
+            handler._check_origin()
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_missing_host_is_403(self):
+        handler = _StubHandler(headers={})
+        with self.assertRaises(server._RequestError) as ctx:
+            handler._check_origin()
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_cross_origin_origin_header_is_403(self):
+        handler = _StubHandler(headers={
+            "Host": "127.0.0.1:%d" % server.PORT,
+            "Origin": "http://evil.example",
+        })
+        with self.assertRaises(server._RequestError) as ctx:
+            handler._check_origin()
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_same_origin_origin_header_passes(self):
+        handler = _StubHandler(headers={
+            "Host": "127.0.0.1:%d" % server.PORT,
+            "Origin": "http://127.0.0.1:%d" % server.PORT,
+        })
+        handler._check_origin()  # must not raise
+
+    def test_cross_site_sec_fetch_site_is_403(self):
+        handler = _StubHandler(headers={
+            "Host": "127.0.0.1:%d" % server.PORT,
+            "Sec-Fetch-Site": "cross-site",
+        })
+        with self.assertRaises(server._RequestError) as ctx:
+            handler._check_origin()
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_same_origin_sec_fetch_site_passes(self):
+        handler = _StubHandler(headers={
+            "Host": "127.0.0.1:%d" % server.PORT,
+            "Sec-Fetch-Site": "same-origin",
+        })
+        handler._check_origin()  # must not raise
+
+    def test_headerless_client_passes(self):
+        # curl and the offline test suite itself send no Origin/Sec-Fetch-Site
+        handler = _StubHandler(headers={"Host": "127.0.0.1:%d" % server.PORT})
+        handler._check_origin()  # must not raise
+
+    def test_enforce_origin_sends_403_and_returns_false(self):
+        handler = _StubHandler(headers={"Host": "evil.example"})
+        self.assertFalse(handler._enforce_origin())
+        self.assertEqual(len(handler.sent), 1)
+        self.assertEqual(handler.sent[0][0], 403)
+
+    def test_enforce_origin_returns_true_on_success(self):
+        handler = _StubHandler(headers={"Host": "127.0.0.1:%d" % server.PORT})
+        self.assertTrue(handler._enforce_origin())
+        self.assertEqual(handler.sent, [])
+
+
+class TestDevModeAllowed(unittest.TestCase):
+    """Dev mode must never be armable purely over HTTP — only by how the
+    process itself was started (MOAI_DEV=1 or --dev)."""
+
+    def test_disabled_by_default(self):
+        with unittest.mock.patch.object(sys, "argv", ["server.py"]), \
+             unittest.mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(server.dev_mode_allowed())
+
+    def test_env_var_enables_it(self):
+        with unittest.mock.patch.object(sys, "argv", ["server.py"]), \
+             unittest.mock.patch.dict(os.environ, {"MOAI_DEV": "1"}):
+            self.assertTrue(server.dev_mode_allowed())
+
+    def test_dev_flag_enables_it(self):
+        with unittest.mock.patch.object(sys, "argv", ["server.py", "--dev"]), \
+             unittest.mock.patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(server.dev_mode_allowed())
+
+    def test_set_runtime_mode_blocks_dev_when_not_allowed(self):
+        with unittest.mock.patch.object(sys, "argv", ["server.py"]), \
+             unittest.mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(server._RequestError) as ctx:
+                server.set_runtime_mode("dev")
+        self.assertEqual(ctx.exception.status, 403)
+
+    def test_execute_dev_operation_blocks_when_not_allowed(self):
+        with unittest.mock.patch.object(sys, "argv", ["server.py"]), \
+             unittest.mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(server._RequestError) as ctx:
+                server.execute_dev_operation("notes.list", {})
+        self.assertEqual(ctx.exception.status, 403)
 
 
 if __name__ == "__main__":

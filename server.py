@@ -7,13 +7,18 @@ MoAI — server.py
 - GET/POST /preferences : language ("es"/"en") + addressed name, persisted to
                         preferences.json (unlike /runtime, this survives a
                         restart).
-- POST   /dev/execute : whitelisted local operations in Dev mode only.
+- GET    /graph       : the current graph (same shape as graph-data.js) —
+                        lets the viewer manually resync without a reload.
+- POST   /dev/execute : whitelisted local operations in Dev mode only, and
+                        Dev mode itself only exists when the server was
+                        started with MOAI_DEV=1 (or --dev).
 - GET    /powers      : builtin powers + connectors.json + tools.json, merged.
 - GET    /notes       : list/search notes-ideas-projects (?q=... optional).
 - GET    /note        : raw markdown content of one note (?path=...).
 - POST   /chat        : scores nodes against the question, top 6, calls the
                         Anthropic API (with save_note/list_notes/delete_note/
-                        manage_connector/manage_tool/web_search tools) with
+                        undo_delete/manage_connector/manage_tool/web_search
+                        tools) with
                         Moai's personality. Returns {"answer", "nodes",
                         "model"}; nodes is empty if the answer was small talk.
 - POST   /remember    : writes a real markdown note into docs/captures/,
@@ -30,6 +35,12 @@ MoAI — server.py
 - GET/POST/PUT/DELETE /connectors, /tools : CRUD over connectors.json and
                         tools.json (id-keyed entries).
 
+Every request must come from the viewer this server itself serves: the
+Host header has to be one of our own loopback names (blocks DNS
+rebinding) and any Origin/Sec-Fetch-Site the browser sends has to be
+same-origin (blocks cross-site forgery of note writes, deletions, and
+API-key-spending /chat and /tts calls).
+
 Standard library only. The API key lives in config.json (root, outside
 viewer/) and never gets sent to the browser.
 """
@@ -41,6 +52,7 @@ import re
 import sys
 import threading
 import time
+import traceback
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -66,6 +78,7 @@ PORT = 4700
 RUNTIME_LOCK = threading.Lock()
 RUNTIME_MODE = "production"
 MAX_BODY_DEV = 65_536
+DEV_MODE_ENV = "MOAI_DEV"
 
 # User-facing CRUD actions. The menu describes operations over resources;
 # backend tool names stay in tools.json and are not duplicated here.
@@ -101,6 +114,20 @@ BUILTIN_POWERS = [
 ]
 
 
+def log_warning(message):
+    """Degraded-but-survivable condition (a malformed optional file, a file
+    that couldn't be cleaned up). Goes to stderr so the operator sees it
+    even when the request itself succeeds with a fallback value."""
+    print("MoAI warning: %s" % message, file=sys.stderr)
+
+
+def log_exception(context):
+    """Full traceback of the exception being handled, so nothing that gets
+    converted into a JSON error response disappears from the server log."""
+    print("MoAI error while handling %s:" % context, file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+
+
 def runtime_status():
     with RUNTIME_LOCK:
         mode = RUNTIME_MODE
@@ -109,13 +136,28 @@ def runtime_status():
         "external_ai": mode == "production",
         "web_search": mode == "production",
         "local_tools": True,
+        "dev_available": dev_mode_allowed(),
     }
+
+
+def dev_mode_allowed():
+    """Dev mode exposes /dev/execute, which reads and writes local files, so
+    it can only be armed when the server is started explicitly for it
+    (MOAI_DEV=1 or `server.py --dev`) — never by an HTTP request."""
+    if os.environ.get(DEV_MODE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    return "--dev" in sys.argv[1:]
 
 
 def set_runtime_mode(mode):
     global RUNTIME_MODE
     if mode not in {"production", "dev"}:
         raise _RequestError("mode must be 'production' or 'dev'", 400)
+    if mode == "dev" and not dev_mode_allowed():
+        raise _RequestError(
+            "Dev mode is not available: restart the server with MOAI_DEV=1 "
+            "(or --dev) to enable it.", 403,
+        )
     with RUNTIME_LOCK:
         RUNTIME_MODE = mode
     return runtime_status()
@@ -208,10 +250,11 @@ LIST_TOOLS_TOOL = {
 DELETE_NOTE_TOOL = {
     "name": "delete_note",
     "description": (
-        "Permanently deletes a note, idea, or project from the galaxy when "
-        "Matatoa clearly asks to delete, remove, or erase it by name. If more "
-        "than one note could match, the tool will say so — ask Matatoa to be "
-        "more specific instead of guessing."
+        "Deletes a note, idea, or project from the galaxy when Matatoa "
+        "clearly asks to delete, remove, or erase it by name. If more than "
+        "one note could match, the tool will say so — ask Matatoa to be more "
+        "specific instead of guessing. Recoverable with undo_delete right "
+        "after, in case a voice command was misheard."
     ),
     "input_schema": {
         "type": "object",
@@ -223,6 +266,18 @@ DELETE_NOTE_TOOL = {
         },
         "required": ["title"],
     },
+}
+
+UNDO_DELETE_TOOL = {
+    "name": "undo_delete",
+    "description": (
+        "Restores the single most recently deleted note, idea, or project — "
+        "use this when Matatoa says 'undo that', 'deshaz eso', 'no quería "
+        "borrar eso', or otherwise walks back a delete right after it "
+        "happened. Only the last deletion is recoverable; an older one is "
+        "gone once a newer delete replaces it in the undo slot."
+    ),
+    "input_schema": {"type": "object", "properties": {}},
 }
 
 MANAGE_CONNECTOR_TOOL = {
@@ -283,8 +338,10 @@ def _safe_editable_path(rel):
     Raises _RequestError on any invalid or out-of-bounds path."""
     if not rel or ".." in rel.replace("\\", "/").split("/"):
         raise _RequestError("Invalid path.", 400)
-    abs_path = os.path.normpath(os.path.join(ROOT, rel.replace("/", os.sep)))
-    docs_abs = os.path.abspath(DOCS_DIR)
+    # realpath, not normpath: a symlink inside docs/ must not become a
+    # write primitive for files anywhere else on the machine.
+    abs_path = os.path.realpath(os.path.join(ROOT, rel.replace("/", os.sep)))
+    docs_abs = os.path.realpath(DOCS_DIR)
     if not (abs_path.startswith(docs_abs + os.sep) or abs_path == docs_abs):
         raise _RequestError("Path is outside the allowed area.", 403)
     for skip in ("en", "es"):
@@ -332,7 +389,15 @@ TYPE_SYNONYMS = {
 
 _sessions = {}
 _session_times = {}          # session_id -> float (last access, for eviction)
-_graph_cache = {"mtime": None, "graph": None}
+# stamp = (st_mtime_ns, st_size): mtime alone misses a rebuild that lands in
+# the same filesystem timestamp tick as the previous one (a /remember and its
+# rebuild are milliseconds apart), which served a stale galaxy
+_graph_cache = {"stamp": None, "graph": None}
+
+# One-slot undo buffer for note deletion: a safety net for a single
+# accidental (often voice-misheard) delete, not a trash can. A second
+# delete before the first is undone overwrites this and the first is gone.
+_last_deleted = {"path": None, "content": None}
 
 # ThreadingHTTPServer: serialize anything that mutates shared state
 _build_lock = threading.Lock()      # note writes + graph build
@@ -357,8 +422,23 @@ def tokenize(text):
 
 
 def load_config():
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """Reads config.json. Raises _RequestError with an actionable message
+    instead of leaking a bare OSError/JSONDecodeError to the client."""
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError as e:
+        raise _RequestError(
+            "config.json not found — copy config.example.json to config.json "
+            "and paste your API key into it.", 500
+        ) from e
+    except OSError as e:
+        raise _RequestError("config.json couldn't be read: %s" % e, 500) from e
+    except ValueError as e:
+        raise _RequestError("config.json is not valid JSON: %s" % e, 500) from e
+    if not isinstance(data, dict):
+        raise _RequestError("config.json must contain a JSON object.", 500)
+    return data
 
 
 def load_preferences():
@@ -370,9 +450,11 @@ def load_preferences():
     try:
         with open(PREFERENCES_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (ValueError, OSError):
+    except (ValueError, OSError) as e:
+        log_warning("ignoring unreadable %s: %s" % (PREFERENCES_FILE, e))
         return {"lang": None, "name": None}
     if not isinstance(data, dict):
+        log_warning("ignoring %s: root is not a JSON object" % PREFERENCES_FILE)
         return {"lang": None, "name": None}
     lang = data.get("lang")
     name = data.get("name")
@@ -403,9 +485,11 @@ def load_elevenlabs_config():
     try:
         with open(CONFIG_EL_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (ValueError, OSError):
+    except (ValueError, OSError) as e:
+        log_warning("ignoring unreadable %s: %s" % (CONFIG_EL_FILE, e))
         return {}
     if not isinstance(data, dict) or not data.get("api_key") or not data.get("voice_id"):
+        log_warning("ignoring %s: needs both api_key and voice_id" % CONFIG_EL_FILE)
         return {}
     return data
 
@@ -413,7 +497,7 @@ def load_elevenlabs_config():
 def text_to_speech(text, el_config):
     """Calls ElevenLabs' with-timestamps endpoint. Returns the parsed JSON
     dict ({"audio_base64": ..., "alignment": {...}, ...}) on success.
-    Raises RuntimeError on any failure — callers should treat that as
+    Raises _UpstreamError on any failure — callers should treat that as
     'fall back to the browser voice', not a hard error."""
     body = json.dumps({
         "text": text,
@@ -434,43 +518,64 @@ def text_to_speech(text, el_config):
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        try:
-            detail = json.loads(e.read().decode("utf-8"))
-            msg = detail.get("detail", {}).get("message", str(e))
-        except Exception:
-            msg = str(e)
-        raise RuntimeError("ElevenLabs error: %s" % msg)
+        raise _UpstreamError(
+            "ElevenLabs error: %s" % _http_error_message(e, "detail")
+        ) from e
     except urllib.error.URLError as e:
-        raise RuntimeError("Couldn't reach ElevenLabs: %s" % e.reason)
+        raise _UpstreamError("Couldn't reach ElevenLabs: %s" % e.reason) from e
 
 
 def load_json_list(path, key):
     """Reads connectors.json/tools.json; empty list if missing, malformed,
-    or its root isn't the expected object/list shape."""
+    or its root isn't the expected object/list shape. Anything ignored is
+    logged — a hand-broken file degrades the galaxy silently otherwise."""
     if not os.path.isfile(path):
         return []
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (ValueError, OSError):
+    except (ValueError, OSError) as e:
         # ValueError covers JSONDecodeError and UnicodeDecodeError
+        log_warning("ignoring unreadable %s: %s" % (path, e))
         return []
     if not isinstance(data, dict):
+        log_warning("ignoring %s: root is not a JSON object" % path)
         return []
     items = data.get(key, [])
-    return items if isinstance(items, list) else []
+    if not isinstance(items, list):
+        log_warning("ignoring %s: '%s' is not a list" % (path, key))
+        return []
+    return items
 
 
 def load_graph():
-    """Reads viewer/graph-data.js (cached by mtime, refreshed after a build)."""
-    mtime = os.path.getmtime(GRAPH_FILE)
-    if _graph_cache["mtime"] != mtime:
-        with open(GRAPH_FILE, "r", encoding="utf-8") as f:
-            raw = f.read()
-        start = raw.index("const GRAPH =") + len("const GRAPH =")
-        payload = raw[start:].strip().rstrip(";").strip()
-        _graph_cache["graph"] = json.loads(payload)
-        _graph_cache["mtime"] = mtime
+    """Reads viewer/graph-data.js (cached by mtime, refreshed after a build).
+
+    Raises _BuildError — with the command that fixes it — when the generated
+    file is missing or unparseable, instead of surfacing a bare
+    FileNotFoundError/ValueError as an opaque 500.
+    """
+    try:
+        stat = os.stat(GRAPH_FILE)
+    except OSError as e:
+        raise _BuildError(
+            "The galaxy hasn't been generated yet (%s) — run 'python3 build.py'." % e
+        ) from e
+    stamp = (stat.st_mtime_ns, stat.st_size)
+    if _graph_cache["stamp"] != stamp:
+        try:
+            with open(GRAPH_FILE, "r", encoding="utf-8") as f:
+                raw = f.read()
+            start = raw.index("const GRAPH =") + len("const GRAPH =")
+            payload = raw[start:].strip().rstrip(";").strip()
+            graph = json.loads(payload)
+        except (OSError, ValueError) as e:
+            raise _BuildError(
+                "The galaxy file is unreadable (%s) — regenerate it with "
+                "'python3 build.py'." % e
+            ) from e
+        _graph_cache["graph"] = graph
+        _graph_cache["stamp"] = stamp
     return _graph_cache["graph"]
 
 
@@ -540,6 +645,9 @@ def _system_prompt_parts_es(name, node_count):
         "- Tienes delete_note para borrar una nota, idea o proyecto cuando "
         "te lo pidan explícitamente por su nombre; si hay ambigüedad, "
         "pregunta antes de borrar.",
+        "- Tienes undo_delete para deshacer el último borrado si %s dice "
+        "'deshaz eso', 'no quería borrar eso' o algo similar justo después "
+        "de un borrado — solo el más reciente es recuperable." % name,
         "- Tienes manage_connector y manage_tool para dar de alta, editar "
         "o borrar conectores y herramientas cuando te lo pidan.",
         "- Si %s pregunta qué puedes hacer, o pide ver el menú u "
@@ -620,6 +728,9 @@ def _system_prompt_parts_en(name, node_count):
         "- You have delete_note to remove a note, idea, or project when "
         "explicitly asked to by name; if there's any ambiguity, ask before "
         "deleting.",
+        "- You have undo_delete to reverse the most recent delete if %s says "
+        "'undo that', 'I didn't mean to delete that', or similar right after "
+        "a delete happens — only the latest one is recoverable." % name,
         "- You have manage_connector and manage_tool to create, edit, or "
         "remove connectors and tools when asked to.",
         "- If %s asks what you can do, or asks to see the menu or "
@@ -682,6 +793,20 @@ def resolve_model(config, requested):
     return requested if requested in allowed else default
 
 
+def _http_error_message(error, detail_key):
+    """Best-effort message out of an HTTPError body ({"<detail_key>":
+    {"message": ...}}), falling back to the HTTP status line. The body is
+    third-party and may be truncated HTML, so a parse failure is expected
+    and logged rather than raised."""
+    try:
+        detail = json.loads(error.read().decode("utf-8"))
+        message = detail.get(detail_key, {}).get("message")
+    except (ValueError, OSError) as parse_error:
+        log_warning("couldn't parse error body from %s: %s" % (error.url, parse_error))
+        return str(error)
+    return message or str(error)
+
+
 def web_search_tool(model):
     tool_type = ("web_search_20260209" if model in WEB_SEARCH_DYNAMIC_MODELS
                  else "web_search_20250305")
@@ -692,7 +817,14 @@ def _api_request(config, model, system_prompt, messages):
     """Single HTTP call to the Messages API. Returns the parsed JSON dict."""
     body = json.dumps({
         "model": model,
-        "max_tokens": 1536,
+        # Generous ceiling, not a target: Moai's own answers are 1-2
+        # sentences by system-prompt instruction, but web_search_tool_result
+        # content counts against this same budget and can be sizable across
+        # up to WEB_SEARCH_MAX_USES searches. 1536 was tight enough to get
+        # exhausted by search results alone, before any answer text — see
+        # "Moai ran out of words" below. A higher cap costs nothing unless
+        # actually used; it isn't a per-call spend target.
+        "max_tokens": 4096,
         "system": system_prompt,
         "messages": messages,
         "tools": [
@@ -702,6 +834,7 @@ def _api_request(config, model, system_prompt, messages):
             LIST_CONNECTORS_TOOL,
             LIST_TOOLS_TOOL,
             DELETE_NOTE_TOOL,
+            UNDO_DELETE_TOOL,
             MANAGE_CONNECTOR_TOOL,
             MANAGE_TOOL_TOOL,
         ],
@@ -720,14 +853,11 @@ def _api_request(config, model, system_prompt, messages):
         with urllib.request.urlopen(req, timeout=120) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        try:
-            detail = json.loads(e.read().decode("utf-8"))
-            msg = detail.get("error", {}).get("message", str(e))
-        except Exception:
-            msg = str(e)
-        raise RuntimeError("Anthropic API error: %s" % msg)
+        raise _UpstreamError(
+            "Anthropic API error: %s" % _http_error_message(e, "error")
+        ) from e
     except urllib.error.URLError as e:
-        raise RuntimeError("Couldn't connect to the API: %s" % e.reason)
+        raise _UpstreamError("Couldn't connect to the API: %s" % e.reason) from e
 
 
 def call_claude(config, model, system_prompt, messages):
@@ -776,6 +906,7 @@ def call_claude(config, model, system_prompt, messages):
                         note_result = remember(text)
                         result_str = "Note saved: '%s'" % note_result["title"]
                     except Exception as exc:
+                        log_exception("save_note tool")
                         result_str = "Failed to save note: %s" % exc
 
                 elif name == "list_notes":
@@ -788,6 +919,7 @@ def call_claude(config, model, system_prompt, messages):
                         else:
                             result_str = "No matching notes found."
                     except Exception as exc:
+                        log_exception("list_notes tool")
                         result_str = "Failed to list notes: %s" % exc
 
                 elif name == "list_connectors":
@@ -809,7 +941,16 @@ def call_claude(config, model, system_prompt, messages):
                         deleted = delete_note_by_title(tool_input.get("title", ""))
                         result_str = "Deleted note '%s'." % deleted["title"]
                     except Exception as exc:
+                        log_exception("delete_note tool")
                         result_str = "Failed to delete: %s" % exc
+
+                elif name == "undo_delete":
+                    try:
+                        restored = undo_last_delete()
+                        result_str = "Restored '%s'." % restored["path"]
+                    except Exception as exc:
+                        log_exception("undo_delete tool")
+                        result_str = "Failed to undo: %s" % exc
 
                 elif name == "manage_connector":
                     try:
@@ -821,6 +962,7 @@ def call_claude(config, model, system_prompt, messages):
                             tool_input.get("id"), tool_input.get("action")
                         )
                     except Exception as exc:
+                        log_exception("manage_connector tool")
                         result_str = "Failed: %s" % exc
 
                 elif name == "manage_tool":
@@ -833,6 +975,7 @@ def call_claude(config, model, system_prompt, messages):
                             tool_input.get("id"), tool_input.get("action")
                         )
                     except Exception as exc:
+                        log_exception("manage_tool tool")
                         result_str = "Failed: %s" % exc
 
                 tool_results.append({
@@ -873,10 +1016,22 @@ def call_claude(config, model, system_prompt, messages):
 
         answer = re.sub(r"\s+", " ", "".join(texts)).strip()
         if not answer:
-            raise RuntimeError("Moai ran out of words mid-search. Try again.")
+            # log_warning (not log_exception): expected-shape failure, not a
+            # bug — but stop_reason is the one clue that tells us WHY there
+            # was no text (max_tokens exhausted by search results before any
+            # answer text, vs. a genuinely empty turn), so surface it.
+            log_warning(
+                "call_claude got no answer text (stop_reason=%s, %d content "
+                "block(s), %d source(s))" % (stop_reason, len(content), len(sources))
+            )
+            raise _UpstreamError("Moai ran out of words mid-search. Try again.")
+        if stop_reason == "max_tokens":
+            # non-empty but possibly truncated mid-sentence: still usable,
+            # but worth knowing about if it becomes a recurring complaint
+            log_warning("call_claude answer may be truncated (stop_reason=max_tokens)")
         return answer, sources, note_result, tools_used
 
-    raise RuntimeError("Tool use loop exceeded safe limit. Try again.")
+    raise _UpstreamError("Tool use loop exceeded safe limit. Try again.")
 
 
 MARK_RE = re.compile(r"\[\[\s*(nodes|chat|web)\s*\]\]", re.IGNORECASE)
@@ -959,14 +1114,17 @@ def remember(text):
     with _build_lock:
         rel_path, title, abs_path = write_capture(text)
         try:
-            build.build()      # regenerates viewer/graph-data.js (atomic)
-        except Exception as e:
+            _rebuild_galaxy()  # regenerates viewer/graph-data.js (atomic)
+        except _BuildError:
             # no orphan note: if the build fails, the file gets removed
             try:
                 os.remove(abs_path)
-            except OSError:
-                pass
-            raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
+            except OSError as cleanup_error:
+                log_warning(
+                    "the note %s survived a failed build and couldn't be "
+                    "removed: %s" % (abs_path, cleanup_error)
+                )
+            raise
         graph = load_graph()   # mtime changed -> reload
 
     new_id = None
@@ -1019,6 +1177,46 @@ def find_notes(query=None):
     return [n for _score, n in scored]
 
 
+def _stash_and_remove(abs_path, rel_path):
+    """Remembers `rel_path`'s content in the one-slot undo buffer, then
+    removes the file. Shared by every note-deletion entry point (the
+    delete_note chat tool, the Dev console, and the plain DELETE /note
+    endpoint) so undo_delete works no matter which one was used."""
+    with open(abs_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    _last_deleted["path"] = rel_path
+    _last_deleted["content"] = content
+    os.remove(abs_path)
+
+
+def undo_last_delete():
+    """Restores the most recently deleted note, if the undo slot is full
+    and nothing has since been (re)created at that path.
+
+    Raises RuntimeError — surfaced to the model/UI the same way every other
+    "can't do that right now" condition is — when there's nothing to undo,
+    or a note has already reappeared at that path (safer to refuse than to
+    silently overwrite whatever is there now).
+    """
+    rel = _last_deleted["path"]
+    if not rel:
+        raise RuntimeError("Nothing to undo.")
+    abs_path = _safe_editable_path(rel)
+    if os.path.exists(abs_path):
+        raise RuntimeError(
+            "Can't undo: a note already exists at '%s'." % rel
+        )
+    with _build_lock:
+        with open(abs_path, "w", encoding="utf-8") as f:
+            f.write(_last_deleted["content"])
+        _last_deleted["path"] = None
+        _last_deleted["content"] = None
+        _rebuild_galaxy()
+        graph = load_graph()
+    node_id = next((n["id"] for n in graph["nodes"] if n.get("path") == rel), None)
+    return {"graph": graph, "path": rel, "node_id": node_id}
+
+
 def delete_note_by_title(title):
     """Deletes the single note/idea/project whose title matches `title`.
 
@@ -1045,11 +1243,8 @@ def delete_note_by_title(title):
     target = matches[0]
     abs_path = _safe_editable_path(target["path"])
     with _build_lock:
-        os.remove(abs_path)
-        try:
-            build.build()
-        except Exception as e:
-            raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
+        _stash_and_remove(abs_path, target["path"])
+        _rebuild_galaxy()
         graph = load_graph()
     return {"graph": graph, "title": target["label"]}
 
@@ -1062,17 +1257,30 @@ def _load_entity_file(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (ValueError, OSError):
+    except (ValueError, OSError) as e:
+        log_warning("ignoring unreadable %s: %s" % (path, e))
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        log_warning("ignoring %s: root is not a JSON object" % path)
+        return {}
+    return data
 
 
 def _save_entity_file(path, data):
+    """Atomic write via a .tmp sibling. A failure anywhere propagates, but
+    never leaves the half-written temporary file behind."""
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except (OSError, ValueError, TypeError):
+        try:
+            os.remove(tmp)
+        except OSError:
+            log_warning("leftover temporary file at %s" % tmp)
+        raise
 
 
 def manage_entity(path, key, action, entity_id, fields):
@@ -1127,10 +1335,7 @@ def manage_entity(path, key, action, entity_id, fields):
 
         data[key] = items
         _save_entity_file(path, data)
-        try:
-            build.build()
-        except Exception as e:
-            raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
+        _rebuild_galaxy()
         graph = load_graph()
 
     return {"graph": graph, "items": items}
@@ -1148,10 +1353,7 @@ def update_note_by_path(rel, content):
     with _build_lock:
         with open(abs_path, "w", encoding="utf-8") as f:
             f.write(content)
-        try:
-            build.build()
-        except Exception as e:
-            raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
+        _rebuild_galaxy()
         graph = load_graph()
     node_id = next((n["id"] for n in graph["nodes"] if n.get("path") == rel), None)
     return {"graph": graph, "node_id": node_id, "path": rel}
@@ -1166,17 +1368,16 @@ def delete_note_by_path(rel):
     if not os.path.isfile(abs_path):
         raise RuntimeError("Note not found.")
     with _build_lock:
-        os.remove(abs_path)
-        try:
-            build.build()
-        except Exception as e:
-            raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
+        _stash_and_remove(abs_path, rel)
+        _rebuild_galaxy()
         graph = load_graph()
     return {"graph": graph, "path": rel}
 
 
 def execute_dev_operation(operation, payload):
     """Run a whitelisted local operation; never calls Anthropic or the web."""
+    if not dev_mode_allowed():
+        raise _RequestError("Dev mode is not available on this server.", 403)
     if runtime_status()["mode"] != "dev":
         raise _RequestError("Dev mode is not active.", 409)
     payload = payload if isinstance(payload, dict) else {}
@@ -1212,7 +1413,7 @@ def execute_dev_operation(operation, payload):
 
     if operation == "graph.rebuild":
         with _build_lock:
-            build.build()
+            _rebuild_galaxy()
             return {"graph": load_graph()}
 
     if operation in {"web.search", "chat.ask"}:
@@ -1221,10 +1422,43 @@ def execute_dev_operation(operation, payload):
 
 
 class _RequestError(Exception):
-    """Known client error (4xx). Carries the HTTP status to send."""
+    """Known error whose HTTP status is decided at the raise site (a 4xx for
+    bad input, a 5xx for a broken local configuration)."""
     def __init__(self, message, status=400):
         super().__init__(message)
         self.status = status
+
+
+class _UpstreamError(RuntimeError):
+    """A third-party API (Anthropic, ElevenLabs) failed or was unreachable.
+
+    Subclasses RuntimeError for backwards compatibility with existing
+    callers, and lets the handlers answer 502 instead of blaming the client
+    or hiding the failure behind a generic 500.
+    """
+
+
+class _BuildError(RuntimeError):
+    """The galaxy on disk couldn't be regenerated or read back.
+
+    Subclasses RuntimeError so callers that already catch RuntimeError keep
+    working, while the request handlers can tell this apart from the
+    domain-level RuntimeErrors ("no note matches...") and answer 500
+    instead of 409.
+    """
+
+
+def _rebuild_galaxy():
+    """Regenerate viewer/graph-data.js, chaining any build failure into a
+    _BuildError so the original traceback survives. Drops the cached graph
+    either way: on success it is stale, and on failure it may describe a
+    galaxy that no longer matches the notes on disk."""
+    try:
+        build.build()
+    except Exception as e:
+        raise _BuildError("Couldn't rebuild the galaxy: %s" % e) from e
+    finally:
+        _graph_cache["stamp"] = None
 
 
 # ------------------------------------------------------------------ handler
@@ -1232,78 +1466,178 @@ class _RequestError(Exception):
 class MoaiHandler(SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
         super().end_headers()
 
     def log_message(self, fmt, *args):
         pass
 
+    def log_error(self, fmt, *args):
+        """http.server routes protocol-level failures (bad request line,
+        oversized headers, a 404 on a static file) through log_error, which
+        defaults to log_message — silenced above. Keep them on stderr."""
+        print("MoAI request error: " + (fmt % args), file=sys.stderr)
+
+    def _check_origin(self):
+        """Reject requests that don't come from the viewer served by this
+        server: an attacker page can't read our replies (no CORS headers),
+        but without this it could still forge note writes, deletions, or
+        API-key-burning /chat and /tts calls, and reach us through a
+        domain of its own resolving to 127.0.0.1 (DNS rebinding).
+
+        Allowed Host/Origin values are derived from the port this server is
+        actually bound to (self.server.server_address), not a hardcoded
+        constant — production always binds PORT, but the offline test suite
+        binds an OS-assigned ephemeral port, and both must be self-consistent.
+
+        Raises _RequestError(403). Header-less clients (curl, tests) pass:
+        only browsers attach Origin/Sec-Fetch-Site, and a browser that
+        does attach them must prove same-origin.
+        """
+        bound_port = self.server.server_address[1]
+        allowed_hosts = frozenset(
+            "%s:%d" % (h, bound_port) for h in ("localhost", "127.0.0.1")
+        )
+        allowed_origins = frozenset(
+            "http://%s:%d" % (h, bound_port) for h in ("localhost", "127.0.0.1")
+        )
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host not in allowed_hosts:
+            raise _RequestError("Unexpected Host header.", 403)
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site and site not in ("same-origin", "none"):
+            raise _RequestError("Cross-site requests are not allowed.", 403)
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin and origin.lower() not in allowed_origins:
+            raise _RequestError("Cross-origin requests are not allowed.", 403)
+
+    def _enforce_origin(self):
+        """_check_origin for the request currently being handled, answering
+        403 itself. Returns False when the request must not go further.
+        Called as the first line of every do_* — including static-file
+        GETs and do_HEAD — so a DNS-rebinding page is blocked even before
+        it can load the viewer itself, not just on the JSON API routes."""
+        try:
+            self._check_origin()
+        except _RequestError as e:
+            self._drain_unread_body()
+            self._send_error_json(str(e), e.status)
+            return False
+        return True
+
+    def do_HEAD(self):
+        if not self._enforce_origin():
+            return
+        super().do_HEAD()
+
+    def _guard(self, route):
+        """Run one route, mapping every failure to a JSON body AND an
+        accurate status: _RequestError carries its own, an upstream API
+        failure is a 502, a failed galaxy rebuild is a 500, a domain
+        RuntimeError ("no note matches...") is a 409, and anything
+        unexpected is a logged, generic 500. Nothing is answered with 200
+        for a request that did not succeed."""
+        context = "%s %s" % (self.command, self.path)
+        try:
+            route()
+        except _RequestError as e:
+            self._drain_unread_body()
+            self._send_error_json(str(e), e.status)
+        except _UpstreamError as e:
+            self._drain_unread_body()
+            log_warning("%s: %s" % (context, e))
+            self._send_error_json(str(e), 502)
+        except _BuildError as e:
+            self._drain_unread_body()
+            log_exception(context)
+            self._send_error_json(str(e), 500)
+        except RuntimeError as e:
+            self._drain_unread_body()
+            self._send_error_json(str(e), 409)
+        except Exception:
+            self._drain_unread_body()
+            log_exception(context)
+            self._send_error_json(
+                "Something went wrong on Moai's side. Try again.", 500
+            )
+
+    def _drain_unread_body(self, max_drain=65_536):
+        """A route that errors out before calling _read_body() (a 404 for
+        an unmatched path, a 403 from _enforce_origin) can leave the
+        client's request body unread on the socket. Draining it before
+        responding avoids a race where closing/responding while the client
+        is still writing aborts the connection instead of delivering the
+        error cleanly. A body bigger than max_drain is abandoned instead —
+        reading it just to respond cleanly would mean trusting an
+        attacker-controlled Content-Length."""
+        if getattr(self, "_body_read", False):
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return
+        if 0 < length <= max_drain:
+            try:
+                self.rfile.read(length)
+            except OSError:
+                pass
+        elif length > max_drain:
+            self.close_connection = True
+
     def do_GET(self):
+        if not self._enforce_origin():
+            return
         path = self.path.split("?", 1)[0]
-        if path == "/runtime":
-            self._send_json(runtime_status())
+        routes = {
+            "/runtime": lambda: self._send_json(runtime_status()),
+            "/preferences": lambda: self._send_json(load_preferences()),
+            "/graph": lambda: self._send_json(load_graph()),
+            "/note": self._handle_note,
+            "/models": self._handle_models,
+            "/powers": self._handle_powers,
+            "/notes": self._handle_notes,
+            "/connectors": lambda: self._send_json(
+                {"connectors": load_json_list(CONNECTORS_FILE, "connectors")}
+            ),
+            "/tools": lambda: self._send_json(
+                {"tools": load_json_list(TOOLS_FILE, "tools")}
+            ),
+        }
+        route = routes.get(path)
+        if route is None:
+            super().do_GET()   # static files out of viewer/
             return
-        if path == "/preferences":
-            self._send_json(load_preferences())
-            return
-        if path == "/note":
-            try:
-                self._handle_note()
-            except _RequestError as e:
-                self._send_json({"error": str(e)}, e.status)
-            except Exception as e:
-                print("MoAI internal error: %s" % e, file=sys.stderr)
-                self._send_json({"error": "Something went wrong on Moai's side. Try again."}, 500)
-            return
-        if path == "/models":
-            try:
-                config = load_config()
-                self._send_json({
-                    "default": config.get("model", "claude-haiku-4-5"),
-                    "models": config.get("models", []),
-                })
-            except Exception as e:
-                self._send_json({"error": str(e)}, 500)
-            return
-        if path == "/powers":
-            try:
-                self._send_json({
-                    "actions": BUILTIN_POWERS,
-                    # Keep the catalog available to future admin/settings UI,
-                    # but do not make it part of the user-facing action menu.
-                    "integration_summary": {
-                        "connectors": len(load_json_list(CONNECTORS_FILE, "connectors")),
-                        "tools": len(load_json_list(TOOLS_FILE, "tools")),
-                    },
-                    # Legacy keys remain for clients built against Phase 7.
-                    "active": BUILTIN_POWERS,
-                    "connectors": load_json_list(CONNECTORS_FILE, "connectors"),
-                    "tools": load_json_list(TOOLS_FILE, "tools"),
-                })
-            except Exception as e:
-                self._send_json({"error": str(e)}, 500)
-            return
-        if path == "/notes":
-            params = dict(urllib.parse.parse_qsl(
-                urllib.parse.urlparse(self.path).query
-            ))
-            try:
-                self._send_json({"notes": find_notes(params.get("q", "").strip() or None)})
-            except Exception as e:
-                self._send_json({"error": str(e)}, 500)
-            return
-        if path == "/connectors":
-            try:
-                self._send_json({"connectors": load_json_list(CONNECTORS_FILE, "connectors")})
-            except Exception as e:
-                self._send_json({"error": str(e)}, 500)
-            return
-        if path == "/tools":
-            try:
-                self._send_json({"tools": load_json_list(TOOLS_FILE, "tools")})
-            except Exception as e:
-                self._send_json({"error": str(e)}, 500)
-            return
-        super().do_GET()
+        self._guard(route)
+
+    def _handle_models(self):
+        config = load_config()
+        self._send_json({
+            "default": config.get("model", "claude-haiku-4-5"),
+            "models": config.get("models", []),
+        })
+
+    def _handle_powers(self):
+        self._send_json({
+            "actions": BUILTIN_POWERS,
+            # Keep the catalog available to future admin/settings UI,
+            # but do not make it part of the user-facing action menu.
+            "integration_summary": {
+                "connectors": len(load_json_list(CONNECTORS_FILE, "connectors")),
+                "tools": len(load_json_list(TOOLS_FILE, "tools")),
+            },
+            # Legacy keys remain for clients built against Phase 7.
+            "active": BUILTIN_POWERS,
+            "connectors": load_json_list(CONNECTORS_FILE, "connectors"),
+            "tools": load_json_list(TOOLS_FILE, "tools"),
+        })
+
+    def _handle_notes(self):
+        params = dict(urllib.parse.parse_qsl(
+            urllib.parse.urlparse(self.path).query
+        ))
+        self._send_json({"notes": find_notes(params.get("q", "").strip() or None)})
 
     def _send_json(self, obj, status=200):
         payload = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -1313,80 +1647,103 @@ class MoaiHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _send_error_json(self, message, status):
+        """Error response that can't itself raise: a client that hung up
+        mid-request must not turn one failure into an unhandled second one."""
+        try:
+            self._send_json({"error": message}, status)
+        except OSError as e:
+            log_warning("couldn't deliver the error response (%s): %s" % (message, e))
+
     def _read_body(self, max_bytes=MAX_BODY_CHAT):
-        length = int(self.headers.get("Content-Length", 0))
+        """Parsed JSON object out of the request body. Every malformed-input
+        case is a 4xx with a specific message, never an opaque 500. The
+        content type is enforced because form/text-plain bodies are exactly
+        what a cross-site request can send without a CORS preflight."""
+        ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if ctype and ctype != "application/json":
+            raise _RequestError("Content-Type must be application/json.", 415)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError as e:
+            raise _RequestError("Invalid Content-Length header.", 400) from e
+        if length < 0:
+            raise _RequestError("Invalid Content-Length header.", 400)
         if length > max_bytes:
             raise _RequestError("Request too large.", 413)
-        return json.loads(self.rfile.read(length).decode("utf-8"))
+        raw = self.rfile.read(length)
+        self._body_read = True
+        if len(raw) != length:
+            raise _RequestError("Incomplete request body.", 400)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except ValueError as e:  # covers JSONDecodeError and UnicodeDecodeError
+            raise _RequestError("Request body is not valid JSON: %s" % e, 400) from e
+        if not isinstance(data, dict):
+            raise _RequestError("Request body must be a JSON object.", 400)
+        return data
 
     def do_POST(self):
-        try:
-            if self.path == "/runtime":
-                data = self._read_body(1024)
-                self._send_json(set_runtime_mode((data.get("mode") or "").strip()))
-            elif self.path == "/preferences":
-                data = self._read_body(1024)
-                self._send_json(save_preferences(data.get("lang"), data.get("name")))
-            elif self.path == "/dev/execute":
-                data = self._read_body(MAX_BODY_DEV)
-                result = execute_dev_operation(data.get("operation", ""), data.get("payload", {}))
-                self._send_json({"ok": True, "operation": data.get("operation", ""), "result": result})
-            elif self.path == "/chat":
-                self._handle_chat()
-            elif self.path == "/remember":
-                self._handle_remember()
-            elif self.path == "/edit":
-                self._handle_edit()
-            elif self.path == "/tts":
-                self._handle_tts()
-            elif self.path == "/connectors":
-                self._handle_entity_action(CONNECTORS_FILE, "connectors", "create")
-            elif self.path == "/tools":
-                self._handle_entity_action(TOOLS_FILE, "tools", "create")
-            else:
-                self._send_json({"error": "not found"}, 404)
-        except _RequestError as e:
-            self._send_json({"error": str(e)}, e.status)
-        except RuntimeError as e:
-            self._send_json({"error": str(e)})
-        except Exception as e:
-            print("MoAI internal error: %s" % e, file=sys.stderr)
-            self._send_json({"error": "Something went wrong on Moai's side. Try again."}, 500)
+        if not self._enforce_origin():
+            return
+        self._guard(self._post_routes)
+
+    def _post_routes(self):
+        if self.path == "/runtime":
+            data = self._read_body(1024)
+            self._send_json(set_runtime_mode((data.get("mode") or "").strip()))
+        elif self.path == "/preferences":
+            data = self._read_body(1024)
+            self._send_json(save_preferences(data.get("lang"), data.get("name")))
+        elif self.path == "/dev/execute":
+            if not dev_mode_allowed():
+                raise _RequestError("Dev mode is not available on this server.", 403)
+            data = self._read_body(MAX_BODY_DEV)
+            result = execute_dev_operation(data.get("operation", ""), data.get("payload", {}))
+            self._send_json({"ok": True, "operation": data.get("operation", ""), "result": result})
+        elif self.path == "/chat":
+            self._handle_chat()
+        elif self.path == "/remember":
+            self._handle_remember()
+        elif self.path == "/edit":
+            self._handle_edit()
+        elif self.path == "/tts":
+            self._handle_tts()
+        elif self.path == "/connectors":
+            self._handle_entity_action(CONNECTORS_FILE, "connectors", "create")
+        elif self.path == "/tools":
+            self._handle_entity_action(TOOLS_FILE, "tools", "create")
+        else:
+            raise _RequestError("not found", 404)
 
     def do_PUT(self):
-        try:
-            if self.path == "/connectors":
-                self._handle_entity_action(CONNECTORS_FILE, "connectors", "update")
-            elif self.path == "/tools":
-                self._handle_entity_action(TOOLS_FILE, "tools", "update")
-            else:
-                self._send_json({"error": "not found"}, 404)
-        except _RequestError as e:
-            self._send_json({"error": str(e)}, e.status)
-        except RuntimeError as e:
-            self._send_json({"error": str(e)})
-        except Exception as e:
-            print("MoAI internal error: %s" % e, file=sys.stderr)
-            self._send_json({"error": "Something went wrong on Moai's side. Try again."}, 500)
+        if not self._enforce_origin():
+            return
+        self._guard(self._put_routes)
+
+    def _put_routes(self):
+        if self.path == "/connectors":
+            self._handle_entity_action(CONNECTORS_FILE, "connectors", "update")
+        elif self.path == "/tools":
+            self._handle_entity_action(TOOLS_FILE, "tools", "update")
+        else:
+            raise _RequestError("not found", 404)
 
     def do_DELETE(self):
+        if not self._enforce_origin():
+            return
+        self._guard(self._delete_routes)
+
+    def _delete_routes(self):
         path = self.path.split("?", 1)[0]
-        try:
-            if path == "/note":
-                self._handle_note_delete()
-            elif path == "/connectors":
-                self._handle_entity_action(CONNECTORS_FILE, "connectors", "delete")
-            elif path == "/tools":
-                self._handle_entity_action(TOOLS_FILE, "tools", "delete")
-            else:
-                self._send_json({"error": "not found"}, 404)
-        except _RequestError as e:
-            self._send_json({"error": str(e)}, e.status)
-        except RuntimeError as e:
-            self._send_json({"error": str(e)})
-        except Exception as e:
-            print("MoAI internal error: %s" % e, file=sys.stderr)
-            self._send_json({"error": "Something went wrong on Moai's side. Try again."}, 500)
+        if path == "/note":
+            self._handle_note_delete()
+        elif path == "/connectors":
+            self._handle_entity_action(CONNECTORS_FILE, "connectors", "delete")
+        elif path == "/tools":
+            self._handle_entity_action(TOOLS_FILE, "tools", "delete")
+        else:
+            raise _RequestError("not found", 404)
 
     def _handle_entity_action(self, file_path, key, action):
         if action == "delete":
@@ -1403,8 +1760,10 @@ class MoaiHandler(SimpleHTTPRequestHandler):
             raise _RequestError("missing id", 400)
         try:
             result = manage_entity(file_path, key, action, entity_id, fields)
+        except _BuildError:
+            raise      # a broken rebuild is a server failure, not a conflict
         except RuntimeError as e:
-            raise _RequestError(str(e), 409)
+            raise _RequestError(str(e), 409) from e
         self._send_json(result)
 
     def _handle_note_delete(self):
@@ -1418,11 +1777,8 @@ class MoaiHandler(SimpleHTTPRequestHandler):
         if not os.path.isfile(abs_path):
             raise _RequestError("note not found", 404)
         with _build_lock:
-            os.remove(abs_path)
-            try:
-                build.build()
-            except Exception as e:
-                raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
+            _stash_and_remove(abs_path, rel)
+            _rebuild_galaxy()
             graph = load_graph()
         self._send_json({"graph": graph})
 
@@ -1454,10 +1810,7 @@ class MoaiHandler(SimpleHTTPRequestHandler):
         with _build_lock:
             with open(abs_path, "w", encoding="utf-8") as f:
                 f.write(content)
-            try:
-                build.build()
-            except Exception as e:
-                raise RuntimeError("Couldn't rebuild the galaxy: %s" % e)
+            _rebuild_galaxy()
             graph = load_graph()
         node_id = next(
             (n["id"] for n in graph["nodes"] if n.get("path") == rel), None
@@ -1468,35 +1821,30 @@ class MoaiHandler(SimpleHTTPRequestHandler):
         data = self._read_body(MAX_BODY_TTS)
         text = (data.get("text") or "").strip()
         if not text:
-            self._send_json({"error": "empty text"}, 400)
-            return
+            raise _RequestError("empty text", 400)
         if len(text) > MAX_TTS_CHARS:
             text = text[:MAX_TTS_CHARS]
 
         el_config = load_elevenlabs_config()
         if not el_config:
-            self._send_json({"error": "ElevenLabs not configured"}, 501)
-            return
-        try:
-            result = text_to_speech(text, el_config)
-        except RuntimeError as e:
-            self._send_json({"error": str(e)}, 502)
-            return
+            raise _RequestError("ElevenLabs not configured", 501)
+        # _UpstreamError surfaces as a 502 (the viewer reads that as "fall
+        # back to the browser voice"); anything else is a real bug and
+        # belongs in the generic 500 path with its traceback.
+        result = text_to_speech(text, el_config)
         self._send_json(result)
 
     def _handle_chat(self):
         if runtime_status()["mode"] == "dev":
-            self._send_json({
-                "error": "Dev mode is active: Anthropic/Claude and web search are disabled. "
-                         "Use the manual Dev console for local operations."
-            }, 403)
-            return
+            raise _RequestError(
+                "Dev mode is active: Anthropic/Claude and web search are disabled. "
+                "Use the manual Dev console for local operations.", 403
+            )
         data = self._read_body(MAX_BODY_CHAT)
         question = (data.get("question") or "").strip()
         session_id = data.get("session_id") or "default"
         if not question:
-            self._send_json({"error": "empty question"}, 400)
-            return
+            raise _RequestError("empty question", 400)
         if len(question) > MAX_QUESTION_CHARS:
             raise _RequestError(
                 "Question too long (max %d characters)." % MAX_QUESTION_CHARS
@@ -1504,12 +1852,17 @@ class MoaiHandler(SimpleHTTPRequestHandler):
 
         config = load_config()
         key = config.get("api_key", "")
-        if not key or "PON-TU-KEY" in key:
-            self._send_json({
-                "error": "Missing API key: paste it into config.json "
-                         "(project root) and ask again."
-            })
-            return
+        # "your-anthropic-key-here" is config.example.json's actual placeholder;
+        # "PON-TU-KEY" was checked here but never matched it, so copying the
+        # template and forgetting to paste a real key produced a raw 401 from
+        # Anthropic instead of this friendlier message.
+        if not key or "your-anthropic-key-here" in key or "PON-TU-KEY" in key:
+            # 500: the local install is misconfigured, and answering 200 here
+            # made the failure look like a successful chat turn
+            raise _RequestError(
+                "Missing API key: paste it into config.json "
+                "(project root) and ask again.", 500
+            )
 
         # create session entry, evicting oldest if at capacity
         with _locks_guard:
@@ -1543,7 +1896,7 @@ class MoaiHandler(SimpleHTTPRequestHandler):
             answer, marker_type = parse_marker(raw_answer, has_sources=bool(sources))
             if not answer:
                 # the answer was only the marker, with no real content
-                raise RuntimeError("Moai ran out of words. Try again.")
+                raise _UpstreamError("Moai ran out of words. Try again.")
             if marker_type != "nodes":
                 node_ids = []
             if marker_type != "web":
@@ -1582,8 +1935,7 @@ class MoaiHandler(SimpleHTTPRequestHandler):
         data = self._read_body(MAX_BODY_REMEMBER)
         text = (data.get("text") or "").strip()
         if not text:
-            self._send_json({"error": "nothing to remember"}, 400)
-            return
+            raise _RequestError("nothing to remember", 400)
         if len(text) > MAX_REMEMBER_CHARS:
             raise _RequestError(
                 "Text too long to remember (max %d characters)." % MAX_REMEMBER_CHARS
@@ -1593,13 +1945,27 @@ class MoaiHandler(SimpleHTTPRequestHandler):
 
 def main():
     handler = partial(MoaiHandler, directory=VIEWER_DIR)
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), handler)
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", PORT), handler)
+    except OSError as e:
+        print(
+            "MoAI can't listen on port %d: %s\n"
+            "Another MoAI (or something else) is probably already running there."
+            % (PORT, e),
+            file=sys.stderr,
+        )
+        return 1
     print("MoAI watching over http://localhost:%d" % PORT)
+    if dev_mode_allowed():
+        print("Dev mode can be enabled from the viewer (%s/--dev is set)" % DEV_MODE_ENV)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         server.shutdown()
+    finally:
+        server.server_close()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
